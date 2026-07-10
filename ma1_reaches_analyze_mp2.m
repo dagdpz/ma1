@@ -173,7 +173,7 @@ function animal_name = parse_animal_from_run_filename(run_file)
     animal_name = strtrim(tokens{1});
 
 function session_date = infer_session_date(input_path, run_files)
-    % Session date from run filenames (Fen2026-01-16_01.mat) or folder (20260116).
+
     session_date = NaT;
     if nargin >= 2 && ~isempty(run_files)
         for k = 1:numel(run_files)
@@ -329,7 +329,7 @@ function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
 
 function out_dir = ensure_output_dir(animal_name, session_date)
     % Output root: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
-    data_root = fullfile('Y:', 'Data');
+    data_root = fullfile('Y:', 'Data', 'Behavior_analysis/');
     animal_dir = fullfile(data_root, animal_name);
     if ~exist(animal_dir, 'dir')
         mkdir(animal_dir);
