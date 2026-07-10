@@ -179,23 +179,23 @@ function [left_reaches, right_reaches, details] = ma1_reaches_analyze_mp(filepat
     end
 
 function position = get_target_pos(trial)
-    % Target position based on x_hnd at state=5
+    % Target side from hnd.tar.x relative to hnd.fix.x
     position = NaN;
     
-    if isfield(trial, 'x_hnd') && isfield(trial, 'state') && ...
-       ~isempty(trial.x_hnd) && ~isempty(trial.state)
-        
-        state5_indices = find(trial.state == 5);
-        if ~isempty(state5_indices)
-            last_state5_idx = state5_indices(end);
-            if last_state5_idx <= length(trial.x_hnd)
-                final_x_value = trial.x_hnd(last_state5_idx);
-                if final_x_value < 0
-                    position = 1; % Left side
-                elseif final_x_value > 0
-                    position = 2; % Right side
-                end
-            end
+    if isfield(trial, 'hnd') && isfield(trial.hnd, 'tar') && isfield(trial.hnd, 'fix') && ...
+       isfield(trial.hnd.fix, 'x')
+        if numel(trial.hnd.tar) == 1 && isfield(trial.hnd.tar, 'x')
+            tar_x = trial.hnd.tar.x;
+        elseif isfield(trial, 'target_selected') && numel(trial.target_selected) >= 2 && ...
+               ~isnan(trial.target_selected(2))
+            tar_x = trial.hnd.tar(trial.target_selected(2)).x;
+        else
+            return;
+        end
+        if tar_x < trial.hnd.fix.x
+            position = 1; % Left side
+        elseif tar_x > trial.hnd.fix.x
+            position = 2; % Right side
         end
     end
 
