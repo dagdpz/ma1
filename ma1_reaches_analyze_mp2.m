@@ -2,6 +2,8 @@ function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date
 % ma1_reaches_analyze_mp2 - Daily reach analysis with per-block and day-summary plots.
 %
 % Timing metrics (successful trials only), two independent epochs:
+%   FIXATION: RTFixToSensorRelease, MTSensorToFixHold
+%   REACH:    RTGoToMovement (Go -> fixation detach), MTMovementToTarget (detach -> target)
 %
 % - Automatically detects all blocks (runs) from *.mat files in the day folder.
 % - Eye-calibration-only runs/trials (effector eye, no hand) are excluded.
