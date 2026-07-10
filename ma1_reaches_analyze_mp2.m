@@ -1,25 +1,20 @@
-function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date, n_before, n_after)
-% ma1_reaches_analyze_mp2 - Modernized daily analysis with silent CLI and Excel export.K>> ma1_reaches_analyze_mp2('Y:\Data\Feno\20260504')
+function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date)
+% ma1_reaches_analyze_mp2 - Daily reach analysis with per-block and day-summary plots.
 %
-% Requirements implemented:
-% - No output in Command Window (no fprintf/warning output).
-% - Prompt user at end of experiment:
-%     "Enter the number of blocks (runs) before injection and after injection:"
-% - Analyze run-by-run (block-by-block).
-% - Export one Excel file with 6 sheets:
-%     Sheet 1: Calculated parameters before injection
-%     Sheet 2: Analysis plots before injection
-%     Sheet 3: Calculated parameters after injection
-%     Sheet 4: Analysis plots after injection
-%     Sheet 5: Trial-by-trial data before injection
-%     Sheet 6: Trial-by-trial data after injection
-% - Include all runs recorded on same experimental day (all *.mat in same folder).
+% Timing metrics (successful trials only), two independent epochs:
+%   FIXATION: RTFixToSensorRelease, MTSensorToFixHold
+%   REACH:    RTGoToMovement (Go -> fixation detach), MTMovementToTarget (detach -> target)
+%
+% - Automatically detects all blocks (runs) from *.mat files in the day folder.
+% - Eye-calibration-only runs/trials (effector eye, no hand) are excluded.
+% - Generates one figure per block and one day-summary figure.
+% - Exports Excel with per-block and day-summary sheets.
+% - Output path: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
 %
 % Usage:
-%   details = ma1_reaches_analyze_mp2('/path/to/one_run.mat', 'Fen');
-%   details = ma1_reaches_analyze_mp2('/path/to/day_folder', 'Fen', datetime(2025,11,18));
-%   details = ma1_reaches_analyze_mp2('/path/to/day_folder', 'Fen', datetime(2025,11,18), 1, 2);
-%     % Last two arguments: n_before, n_after (optional - will prompt if not provided)
+%   details = ma1_reaches_analyze_mp2('/path/to/one_run.mat', 'monkey_name');
+%   details = ma1_reaches_analyze_mp2('/path/to/day_folder', 'monkey_name');
+%   Session date is auto-detected from run filenames or folder name unless provided.
 
     % Keep MATLAB quiet
     prevWarn = warning('query', 'all');
@@ -32,76 +27,70 @@ function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date
     if nargin < 2 || isempty(animal_name)
         animal_name = infer_animal_name(input_path);
     end
-    if nargin < 3 || isempty(session_date)
-        session_date = datetime('today');
-    end
 
-    % Collect all run files for the day
-    run_files = list_day_runs(input_path);
+    % Collect all run files for the day (skip eye-calibration-only blocks)
+    all_run_files = list_day_runs(input_path);
+    run_files = filter_calibration_runs(all_run_files);
     if isempty(run_files)
-        error('No .mat files found for the day.');
+        error('No hand-reach .mat files found for the day (only eye-calibration runs detected).');
     end
 
-    % Prompt at end of experiment for blocks before/after injection (if not provided)
-    if nargin < 4 || isempty(n_before) || nargin < 5 || isempty(n_after)
-        [n_before, n_after] = prompt_blocks_before_after();
-    end
-    if n_before + n_after > numel(run_files)
-        error('Not enough runs found: requested %d (before+after), found %d.', n_before+n_after, numel(run_files));
+    if nargin < 3 || isempty(session_date)
+        session_date = infer_session_date(input_path, run_files);
     end
 
-    before_files = run_files(1:n_before);
-    after_files  = run_files((n_before+1):(n_before+n_after));
+    n_blocks = numel(run_files);
 
-    % Analyze each run and build parameter tables
-    before_tbl = analyze_runs_to_table(before_files, 'Before');
-    after_tbl  = analyze_runs_to_table(after_files,  'After');
-    
-    % Create trial-by-trial detailed tables
-    before_trials_tbl = analyze_runs_to_trial_table(before_files, 'Before');
-    after_trials_tbl  = analyze_runs_to_trial_table(after_files,  'After');
-
-    % Create plots (same style as older MATLAB plots) and save as PNGs
-    out_dir = ensure_output_dir(animal_name);
+    out_dir = ensure_output_dir(animal_name, session_date);
     date_str = datestr(session_date, 'yyyy-mm-dd');
     excel_filename = sprintf('%s_%s.xlsx', animal_name, date_str);
     excel_fullpath = fullfile(out_dir, excel_filename);
 
-    % Create plots and save as PNG files (no Excel sheets for plots)
-    before_base = sprintf('%s_%s_before', animal_name, date_str);
-    after_base  = sprintf('%s_%s_after',  animal_name, date_str);
+    block_tbls = cell(n_blocks, 1);
+    block_trials_tbls = cell(n_blocks, 1);
+    block_plot_paths = cell(n_blocks, 1);
 
-    before_plot_paths = make_plots_for_condition(before_tbl, out_dir, before_base);
-    before_delay_plots = make_delay_duration_plots(before_trials_tbl, out_dir, before_base);
-    before_tacq_plots = make_target_acquisition_plots(before_trials_tbl, out_dir, before_base);
-    before_plot_paths = [before_plot_paths; before_delay_plots; before_tacq_plots];
-
-    % If n_after == 0, skip all "after" plots (prevents errors on empty input)
-    after_plot_paths = {};
-    if n_after > 0
-        after_plot_paths  = make_plots_for_condition(after_tbl,  out_dir, after_base);
-        after_delay_plots  = make_delay_duration_plots(after_trials_tbl,  out_dir, after_base);
-        after_tacq_plots  = make_target_acquisition_plots(after_trials_tbl,  out_dir, after_base);
-        after_plot_paths = [after_plot_paths; after_delay_plots; after_tacq_plots];
+    for k = 1:n_blocks
+        block_label = sprintf('Block%d', k);
+        block_tbls{k} = analyze_runs_to_table(run_files(k), block_label);
+        block_trials_tbls{k} = analyze_runs_to_trial_table(run_files(k), block_label);
+        base_name = sprintf('%s_%s_block%d', animal_name, date_str, k);
+        block_plot_paths{k} = [ ...
+            make_block_analysis_figure(block_trials_tbls{k}, block_tbls{k}, out_dir, base_name); ...
+            make_free_choice_timing_figure(block_trials_tbls{k}, block_tbls{k}, out_dir, base_name)];
     end
 
-    % Export to Excel
-    write_tables_to_excel(excel_fullpath, before_tbl, after_tbl, before_trials_tbl, after_trials_tbl);
+    day_tbl = analyze_runs_to_table(run_files, 'Day');
+    day_trials_tbl = analyze_runs_to_trial_table(run_files, 'Day');
+    day_base = sprintf('%s_%s_day', animal_name, date_str);
+    day_plot_paths = [ ...
+        make_block_analysis_figure(day_trials_tbl, day_tbl, out_dir, day_base); ...
+        make_free_choice_timing_figure(day_trials_tbl, day_tbl, out_dir, day_base)];
 
-    % Return details struct
+    all_plot_paths = day_plot_paths;
+    for k = 1:n_blocks
+        all_plot_paths = [all_plot_paths; block_plot_paths{k}]; %#ok<AGROW>
+    end
+
+    write_tables_to_excel(excel_fullpath, block_tbls, block_trials_tbls, day_tbl, day_trials_tbl);
+
     details = struct();
     details.animal_name = animal_name;
     details.session_date = session_date;
     details.run_files = run_files;
-    details.n_before = n_before;
-    details.n_after = n_after;
+    details.n_blocks = n_blocks;
+    if numel(all_run_files) > numel(run_files)
+        details.skipped_calibration_runs = setdiff(all_run_files, run_files);
+    else
+        details.skipped_calibration_runs = {};
+    end
     details.excel_fullpath = excel_fullpath;
-    details.before_plot_files = before_plot_paths;
-    details.after_plot_files = after_plot_paths;
-    details.before_table = before_tbl;
-    details.after_table = after_tbl;
-    details.before_trials_table = before_trials_tbl;
-    details.after_trials_table = after_trials_tbl;
+    details.out_dir = out_dir;
+    details.plot_files = all_plot_paths;
+    details.block_tables = block_tbls;
+    details.day_table = day_tbl;
+    details.block_trials_tables = block_trials_tbls;
+    details.day_trials_table = day_trials_tbl;
     
     % Display completion message
     fprintf('\nAnalysis complete successfully, data saved in %s\n', out_dir);
@@ -148,12 +137,87 @@ function x_position = get_target_x_position(trial)
 % =========================
 
 function animal_name = infer_animal_name(input_path)
+    % Prefer animal prefix from run filenames: {Animal}{YYYY-MM-DD}_{NN}.mat
+    % e.g. Fen2026-01-16_01.mat -> Fen. Falls back to folder name if parsing fails.
+    run_files = list_day_runs(input_path);
+    if ~isempty(run_files)
+        parsed_names = cell(size(run_files));
+        for k = 1:numel(run_files)
+            parsed_names{k} = parse_animal_from_run_filename(run_files{k});
+        end
+        parsed_names = parsed_names(~cellfun('isempty', parsed_names));
+        if ~isempty(parsed_names)
+            animal_name = parsed_names{1};
+            return;
+        end
+    end
+
     if isfolder(input_path)
         [~, animal_name] = fileparts(input_path);
         return;
     end
     [parent_path, ~, ~] = fileparts(input_path);
     [~, animal_name] = fileparts(parent_path);
+
+function animal_name = parse_animal_from_run_filename(run_file)
+    % Extract animal prefix before session date in run filename.
+    animal_name = '';
+    if isempty(run_file)
+        return;
+    end
+    [~, stem, ~] = fileparts(run_file);
+    tokens = regexp(stem, '^(.+?)(\d{4}-\d{2}-\d{2})_\d+$', 'tokens', 'once');
+    if isempty(tokens)
+        return;
+    end
+    animal_name = strtrim(tokens{1});
+
+function session_date = infer_session_date(input_path, run_files)
+    % Session date from run filenames (Fen2026-01-16_01.mat) or folder (20260116).
+    session_date = NaT;
+    if nargin >= 2 && ~isempty(run_files)
+        for k = 1:numel(run_files)
+            session_date = parse_session_date_from_run_filename(run_files{k});
+            if ~isnat(session_date)
+                return;
+            end
+        end
+    end
+    session_date = parse_session_date_from_path(input_path);
+    if isnat(session_date)
+        session_date = datetime('today');
+    end
+
+function session_date = parse_session_date_from_run_filename(run_file)
+    session_date = NaT;
+    if isempty(run_file)
+        return;
+    end
+    [~, stem, ~] = fileparts(run_file);
+    tokens = regexp(stem, '(\d{4}-\d{2}-\d{2})_\d+$', 'tokens', 'once');
+    if isempty(tokens)
+        return;
+    end
+    session_date = datetime(tokens{1}, 'InputFormat', 'yyyy-MM-dd');
+
+function session_date = parse_session_date_from_path(input_path)
+    % Folder names like 20260116 -> 2026-01-16.
+    session_date = NaT;
+    if isempty(input_path)
+        return;
+    end
+    if isfolder(input_path)
+        folder_name = char(input_path);
+    else
+        folder_name = fileparts(input_path);
+    end
+    [~, name, ~] = fileparts(folder_name);
+    tokens = regexp(name, '^(\d{8})$', 'tokens', 'once');
+    if isempty(tokens)
+        return;
+    end
+    ymd = tokens{1};
+    session_date = datetime(str2double(ymd(1:4)), str2double(ymd(5:6)), str2double(ymd(7:8)));
 
 function run_files = list_day_runs(input_path)
     if isfolder(input_path)
@@ -171,64 +235,138 @@ function run_files = list_day_runs(input_path)
     d = d(idx);
     run_files = fullfile({d.folder}, {d.name});
 
-function [n_before, n_after] = prompt_blocks_before_after()
-    prompt = "Enter the number of blocks (runs) before injection and after injection:";
-    while true
-        s = strtrim(input(prompt + newline, 's'));
-        nums = sscanf(s, '%d %d');
-        if numel(nums) == 2 && all(nums >= 0)
-            n_before = nums(1);
-            n_after = nums(2);
+function run_files = filter_calibration_runs(run_files)
+    % Drop run files that contain only eye-calibration trials (no hand task).
+    if isempty(run_files)
+        return;
+    end
+    keep = false(size(run_files));
+    for k = 1:numel(run_files)
+        keep(k) = ~is_calibration_run_file(run_files{k});
+    end
+    run_files = run_files(keep);
+
+function tf = is_calibration_run_file(filepath)
+    % True when every trial in the run is an eye-calibration task.
+    tf = false;
+    if isempty(filepath) || ~isfile(filepath)
+        return;
+    end
+    data = load(filepath);
+    if ~isfield(data, 'trial') || isempty(data.trial)
+        return;
+    end
+    trials = data.trial;
+    tf = true;
+    for i = 1:numel(trials)
+        if ~is_eye_calibration_trial(trials(i))
+            tf = false;
             return;
         end
     end
 
-function out_dir = ensure_output_dir(animal_name)
-    % Use current directory or create exel folder in user's Documents
-    if ispc
-        base_excel_dir = fullfile(getenv('USERPROFILE'), 'Documents', 'exel');
-    else
-        base_excel_dir = fullfile(getenv('HOME'), 'Documents', 'exel');
+function trials = filter_reach_trials(trials)
+    % Keep only hand-reach trials; drop eye-calibration trials if mixed into a run.
+    if isempty(trials)
+        return;
     end
-    out_dir = fullfile(base_excel_dir, animal_name);
+    keep = false(numel(trials), 1);
+    for i = 1:numel(trials)
+        keep(i) = ~is_eye_calibration_trial(trials(i));
+    end
+    trials = trials(keep);
+
+function tf = is_eye_calibration_trial(trial)
+    % Eye-calibration task: hands are not used (effector eye / task type calibration).
+    tf = false;
+    if isempty(trial) || ~isstruct(trial)
+        return;
+    end
+    effector = get_scalar_num_field(trial, 'effector');
+    if ~isnan(effector) && effector == 0
+        tf = true;
+        return;
+    end
+    trial_type = get_scalar_num_field(trial, 'type');
+    if ~isnan(trial_type) && trial_type == 1
+        tf = true;
+    end
+
+function tbl = empty_trial_table()
+    tbl = table( ...
+        string([]), int32([]), int32([]), string([]), ...
+        string([]), double([]), double([]), double([]), double([]), double([]), double([]), ...
+        string([]), string([]), double([]), string([]), double([]), ...
+        'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', ...
+        'RTFixToSensorRelease', 'MTSensorToFixHold', 'RTGoToMovement', 'MTMovementToTarget', ...
+        'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
+
+function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
+    run_tbl = table( ...
+        string(condition_label), run_index, string(filepath), string(""), 0, 0, 0, 0, ...
+        NaN, NaN, NaN, ...
+        0, 0, 0, 0, ...
+        0, 0, 0, 0, ...
+        0, 0, 0, 0, ...
+        0, 0, NaN, ...
+        0, 0, NaN, ...
+        0, 0, NaN, ...
+        0, 0, NaN, ...
+        0, 0, 0, 0, 0, ...
+        'VariableNames', { ...
+            'Condition','Run','File','ReachParadigm','AllTrials','InitiatedTrials','SuccessfulTrials','FailedTrials', ...
+            'PctInitiatedOfAll','PctSuccessfulOfAll','PctSuccessfulOfInitiated', ...
+            'LeftHandAll','RightHandAll','LeftTargets','RightTargets', ...
+            'Instr_LL','Instr_LR','Instr_RL','Instr_RR', ...
+            'Free_LL','Free_LR','Free_RL','Free_RR', ...
+            'FreeLeftTotal','FreeLeftSuccess','FreeLeftSuccessPct', ...
+            'FreeRightTotal','FreeRightSuccess','FreeRightSuccessPct', ...
+            'InstrLeftTotal','InstrLeftSuccess','InstrLeftSuccessPct', ...
+            'InstrRightTotal','InstrRightSuccess','InstrRightSuccessPct', ...
+            'abort_use_incorrect_hand','abort_hnd_fix_acq_state','abort_hnd_del_per_state', ...
+            'abort_hnd_tar_acq_state','abort_hnd_fix_hold_state' ...
+        });
+
+function out_dir = ensure_output_dir(animal_name, session_date)
+    % Output root: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
+    data_root = fullfile('Y:', 'Data');
+    animal_dir = fullfile(data_root, animal_name);
+    if ~exist(animal_dir, 'dir')
+        mkdir(animal_dir);
+    end
+    session_folder = sprintf('%s_%s', animal_name, datestr(session_date, 'yyyy-mm-dd'));
+    out_dir = fullfile(animal_dir, session_folder);
     if ~exist(out_dir, 'dir')
         mkdir(out_dir);
     end
 
-function tbl = analyze_runs_to_table(run_files, condition_label)
-    n = numel(run_files);
-    if n == 0
-        tbl = empty_run_summary_table(condition_label);
+function run_files = normalize_run_files(run_files)
+    if iscell(run_files)
+        if numel(run_files) == 1 && iscell(run_files{1})
+            run_files = run_files{1};
+        end
         return;
     end
+    if isstring(run_files)
+        run_files = cellstr(run_files);
+        return;
+    end
+    if ischar(run_files)
+        run_files = {run_files};
+    end
+
+function tbl = analyze_runs_to_table(run_files, condition_label)
+    run_files = normalize_run_files(run_files);
+    n = numel(run_files);
     rows = cell(n, 1);
     for k = 1:n
         rows{k} = analyze_single_run(run_files{k}, k, condition_label);
     end
     tbl = vertcat(rows{:});
 
-function tbl = empty_run_summary_table(condition_label)
-    % Return an empty table with the same variables as analyze_single_run output.
-    % This prevents dot-indexing errors when n_before or n_after is 0.
-    varNames = { ...
-        'Condition','Run','File','AllTrials','InitiatedTrials','SuccessfulTrials','FailedTrials', ...
-        'PctInitiatedOfAll','PctSuccessfulOfAll','PctSuccessfulOfInitiated', ...
-        'LeftHandAll','RightHandAll','LeftTargets','RightTargets', ...
-        'Instr_LL','Instr_LR','Instr_RL','Instr_RR', ...
-        'Free_LL','Free_LR','Free_RL','Free_RR', ...
-        'FreeLeftTotal','FreeLeftSuccess','FreeLeftSuccessPct', ...
-        'FreeRightTotal','FreeRightSuccess','FreeRightSuccessPct', ...
-        'InstrLeftTotal','InstrLeftSuccess','InstrLeftSuccessPct', ...
-        'InstrRightTotal','InstrRightSuccess','InstrRightSuccessPct', ...
-        'abort_use_incorrect_hand','abort_hnd_fix_acq_state','abort_hnd_del_per_state', ...
-        'abort_hnd_tar_acq_state','abort_hnd_fix_hold_state' ...
-    };
-    varTypes = [{ 'string','double','string' }, repmat({'double'}, 1, numel(varNames)-3)];
-    tbl = table('Size',[0 numel(varNames)], 'VariableTypes', varTypes, 'VariableNames', varNames);
-    tbl.Condition = repmat(string(condition_label), 0, 1);
-
 function tbl = analyze_runs_to_trial_table(run_files, condition_label)
     % Create a detailed trial-by-trial table with delay duration and success status
+    run_files = normalize_run_files(run_files);
     n = numel(run_files);
     all_trial_tables = cell(n, 1);
     
@@ -241,9 +379,11 @@ function tbl = analyze_runs_to_trial_table(run_files, condition_label)
         % Create empty table with correct structure
         tbl = table( ...
             string([]), int32([]), int32([]), string([]), ...
-            string([]), double([]), double([]), string([]), string([]), ...
-            double([]), string([]), double([]), ...
-            'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', 'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
+            string([]), double([]), double([]), double([]), double([]), double([]), double([]), ...
+            string([]), string([]), double([]), string([]), double([]), ...
+            'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', ...
+            'RTFixToSensorRelease', 'MTSensorToFixHold', 'RTGoToMovement', 'MTMovementToTarget', ...
+            'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
     else
         % Remove empty tables
         non_empty = ~cellfun(@isempty, all_trial_tables);
@@ -252,9 +392,11 @@ function tbl = analyze_runs_to_trial_table(run_files, condition_label)
         else
             tbl = table( ...
                 string([]), int32([]), int32([]), string([]), ...
-                string([]), double([]), double([]), string([]), string([]), ...
-                double([]), string([]), double([]), ...
-                'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', 'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
+                string([]), double([]), double([]), double([]), double([]), double([]), double([]), ...
+                string([]), string([]), double([]), string([]), double([]), ...
+                'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', ...
+            'RTFixToSensorRelease', 'MTSensorToFixHold', 'RTGoToMovement', 'MTMovementToTarget', ...
+            'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
         end
     end
 
@@ -264,11 +406,11 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
     if ~isfield(data, 'trial')
         error('File does not contain variable "trial": %s', filepath);
     end
-    trials = normalize_trials(data.trial);
+    trials = filter_reach_trials(data.trial);
     
     n_trials = length(trials);
     if n_trials == 0
-        trial_rows = cell(0, 1);
+        trial_rows = empty_trial_table();
         return;
     end
     
@@ -280,6 +422,10 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
     task_type_col = repmat(string(""), n_trials, 1);
     delay_col = NaN(n_trials, 1);
     target_acq_time_col = NaN(n_trials, 1);
+    rt_fix_sensor_col = NaN(n_trials, 1);
+    mt_sensor_fix_col = NaN(n_trials, 1);
+    rt_go_move_col = NaN(n_trials, 1);
+    mt_move_target_col = NaN(n_trials, 1);
     target_col = repmat(string(""), n_trials, 1);
     hand_col = repmat(string(""), n_trials, 1);
     success_col = zeros(n_trials, 1);
@@ -288,9 +434,6 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
     
     for i = 1:n_trials
         trial = trials(i);
-        if ~isstruct(trial)
-            continue;
-        end
         
         % Extract task type (choice field: 0=instructed, 1=free)
         if isfield(trial, 'choice')
@@ -319,6 +462,16 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
             end
         end
         
+        % Extract success status before timing metrics (RT/MT only for successful trials)
+        if isfield(trial, 'success') && ~isempty(trial.success)
+            success_col(i) = double(trial.success(1));
+        end
+
+        if success_col(i) == 1
+            [rt_fix_sensor_col(i), mt_sensor_fix_col(i), rt_go_move_col(i), mt_move_target_col(i)] = ...
+                get_trial_timing_metrics(trial);
+        end
+        
         % Extract target position
         target_pos = get_target_pos(trial); % 1 left, 2 right
         if target_pos == 1
@@ -337,15 +490,8 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
             end
         end
         
-        % Extract success status
-        if isfield(trial, 'success')
-            success_col(i) = double(trial.success);
-        else
-            success_col(i) = NaN;
-        end
-        
         % Extract abort reason (if trial failed) - convert to lowercase
-        if ~isnan(success_col(i)) && success_col(i) == 0
+        if success_col(i) == 0
             reason = get_abort_reason(trial);
             if ~isempty(reason)
                 abort_reason_col(i) = string(lower(reason));
@@ -373,35 +519,36 @@ function trial_rows = analyze_single_run_trials(filepath, run_index, condition_l
         task_type_col, ...
         delay_col, ...
         target_acq_time_col, ...
+        rt_fix_sensor_col, ...
+        mt_sensor_fix_col, ...
+        rt_go_move_col, ...
+        mt_move_target_col, ...
         target_col, ...
         hand_col, ...
         success_col, ...
         abort_reason_col, ...
         time_until_abort_col, ...
-        'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', 'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
+        'VariableNames', {'Condition', 'Run', 'Trial', 'File', 'TaskType', 'DelayDuration', 'TargetAcqTime', ...
+        'RTFixToSensorRelease', 'MTSensorToFixHold', 'RTGoToMovement', 'MTMovementToTarget', ...
+        'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort'});
 
 function run_tbl = analyze_single_run(filepath, run_index, condition_label)
     data = load(filepath);
     if ~isfield(data, 'trial')
         error('File does not contain variable "trial": %s', filepath);
     end
-    trials = normalize_trials(data.trial);
+    trials = filter_reach_trials(data.trial);
+    reach_paradigm = get_reach_paradigm_type(data, trials);
+    if isempty(trials)
+        run_tbl = empty_run_summary_table(condition_label, run_index, filepath);
+        run_tbl.ReachParadigm(:) = reach_paradigm;
+        return;
+    end
 
     % Basic counts
     all_trials = length(trials);
-    successful_trials = 0;
-    failed_trials = 0;
-    for ii = 1:all_trials
-        if ~isstruct(trials(ii)) || ~isfield(trials(ii), 'success') || isempty(trials(ii).success)
-            continue;
-        end
-        s = double(trials(ii).success(1));
-        if s == 1
-            successful_trials = successful_trials + 1;
-        elseif s == 0
-            failed_trials = failed_trials + 1;
-        end
-    end
+    successful_trials = sum([trials.success] == 1);
+    failed_trials = sum([trials.success] == 0);
     initiated_trials = successful_trials + failed_trials;
 
     % Reach hand counts (all trials) - robust to non-scalar reach_hand
@@ -443,9 +590,6 @@ function run_tbl = analyze_single_run(filepath, run_index, condition_label)
 
     for i = 1:length(trials)
         trial = trials(i);
-        if ~isstruct(trial) || ~isfield(trial, 'success') || isempty(trial.success)
-            continue;
-        end
 
         target_position = get_target_pos(trial); % 1 left, 2 right
 
@@ -567,7 +711,7 @@ function run_tbl = analyze_single_run(filepath, run_index, condition_label)
     instructed_right_sr = safe_pct(instructed_right_success, instructed_right_total);
 
     run_tbl = table( ...
-        string(condition_label), run_index, string(filepath), all_trials, initiated_trials, successful_trials, failed_trials, ...
+        string(condition_label), run_index, string(filepath), reach_paradigm, all_trials, initiated_trials, successful_trials, failed_trials, ...
         pct_initiated_all, pct_success_all, pct_success_initiated, ...
         left_hand_all, right_hand_all, left_targets_all, right_targets_all, ...
         instructed_LL, instructed_LR, instructed_RL, instructed_RR, ...
@@ -579,7 +723,7 @@ function run_tbl = analyze_single_run(filepath, run_index, condition_label)
         abort_use_incorrect_hand, abort_hnd_fix_acq_state, abort_hnd_del_per_state, ...
         abort_hnd_tar_acq_state, abort_hnd_fix_hold_state, ...
         'VariableNames', { ...
-            'Condition','Run','File','AllTrials','InitiatedTrials','SuccessfulTrials','FailedTrials', ...
+            'Condition','Run','File','ReachParadigm','AllTrials','InitiatedTrials','SuccessfulTrials','FailedTrials', ...
             'PctInitiatedOfAll','PctSuccessfulOfAll','PctSuccessfulOfInitiated', ...
             'LeftHandAll','RightHandAll','LeftTargets','RightTargets', ...
             'Instr_LL','Instr_LR','Instr_RL','Instr_RR', ...
@@ -592,34 +736,45 @@ function run_tbl = analyze_single_run(filepath, run_index, condition_label)
             'abort_hnd_tar_acq_state','abort_hnd_fix_hold_state' ...
         });
 
-function trials = normalize_trials(trials)
-    % Normalize loaded `trial` to a struct array; drop non-struct entries.
-    if isempty(trials)
-        trials = struct([]);
-        return;
-    end
-    if iscell(trials)
-        trials = trials(:);
-        is_ok = cellfun(@(t) isstruct(t) && ~isempty(t), trials);
-        if any(is_ok)
-            trials = [trials{is_ok}];
-        else
-            trials = struct([]);
-        end
-        return;
-    end
-    if ~isstruct(trials)
-        trials = struct([]);
-        return;
-    end
-    % Struct array: keep as-is
- 
-
 function pct = safe_pct(x, n)
     if n > 0
         pct = x / n * 100;
     else
         pct = NaN;
+    end
+
+function paradigm = get_reach_paradigm_type(data, trials)
+    % Block-level reach paradigm label for general summary tables.
+    paradigm = "";
+    if isfield(data, 'task')
+        paradigm = effector_to_paradigm_label(get_scalar_num_field(data.task, 'effector'));
+    end
+    if paradigm == ""
+        effectors = [];
+        for i = 1:numel(trials)
+            eff = get_scalar_num_field(trials(i), 'effector');
+            if ~isnan(eff)
+                effectors(end + 1) = eff; %#ok<AGROW>
+            end
+        end
+        if ~isempty(effectors)
+            paradigm = effector_to_paradigm_label(mode(effectors));
+        end
+    end
+    if paradigm == ""
+        paradigm = "unknown";
+    end
+
+function paradigm = effector_to_paradigm_label(effector)
+    % Map MonkeyPsych effector code to analysis label.
+    paradigm = "";
+    if isnan(effector)
+        return;
+    end
+    if ismember(effector, [1, 6])
+        paradigm = "direct reaches";
+    elseif effector == 4
+        paradigm = "dissociated reaches";
     end
 
 function v = get_scalar_num_field(tr, fieldname)
@@ -638,21 +793,11 @@ function d = get_delay_outcome(tr)
     % Returns 1 (success), 0 (fail), or NaN (unknown) for delay period outcome.
     % Tries several possible field names/types.
     d = NaN;
-    try
-        if isempty(tr) || ~isstruct(tr)
-            return;
-        end
-        candidate_fields = {'delay_success','delaySuccess','delay_outcome','delayOutcome','delay'};
-        for i = 1:numel(candidate_fields)
-            fn = candidate_fields{i};
-            try
-                if ~isfield(tr, fn)
-                    continue;
-                end
-                val = tr.(fn);
-            catch
-                continue;
-            end
+    candidate_fields = {'delay_success','delaySuccess','delay_outcome','delayOutcome','delay'};
+    for i = 1:numel(candidate_fields)
+        fn = candidate_fields{i};
+        if isfield(tr, fn)
+            val = tr.(fn);
             if isempty(val)
                 continue;
             end
@@ -672,16 +817,11 @@ function d = get_delay_outcome(tr)
                 end
             end
         end
-    catch
-        d = NaN;
     end
 
 function f = get_aborted_flag(tr)
     % Returns 1 if trial is marked as aborted in any reasonable field, else 0.
     f = 0;
-    if isempty(tr) || ~isstruct(tr)
-        return;
-    end
     candidate_fields = {'aborted','abort','isAborted','trial_aborted','is_abort'};
     for i = 1:numel(candidate_fields)
         fn = candidate_fields{i};
@@ -710,22 +850,12 @@ function reason = get_abort_reason(tr)
     % Returns a short text label describing abort reason, or '' if unknown.
     % Priority: abort_code (most common) > abort_reason > other fields
     reason = '';
-    try
-        if isempty(tr) || ~isstruct(tr)
-            return;
-        end
-        candidate_fields = {'abort_code','abortCode','abort_reason','abortReason','aborted_reason', ...
-                            'error','error_code','errorCode','fail_reason','failReason'};
-        for i = 1:numel(candidate_fields)
-            fn = candidate_fields{i};
-            try
-                if ~isfield(tr, fn)
-                    continue;
-                end
-                val = tr.(fn);
-            catch
-                continue;
-            end
+    candidate_fields = {'abort_code','abortCode','abort_reason','abortReason','aborted_reason', ...
+                        'error','error_code','errorCode','fail_reason','failReason'};
+    for i = 1:numel(candidate_fields)
+        fn = candidate_fields{i};
+        if isfield(tr, fn)
+            val = tr.(fn);
             if isempty(val)
                 continue;
             end
@@ -745,437 +875,864 @@ function reason = get_abort_reason(tr)
                 return;
             end
         end
-    catch
-        reason = '';
     end
 
-function plot_paths = make_plots_for_condition(tbl, out_dir, base_name)
-    % Create the same plots as before, but aggregated across runs:
-    % - Combination counts (Free and Instructed)
-    % - Ipsi vs Contra
+function [rt_fix_sensor, mt_sensor_fix, rt_go_move, mt_move_target] = get_trial_timing_metrics(trial)
+    % Trial timing on successful trials only. Two independent stimulus->response epochs:
     %
-    % Save each figure as PNG (offscreen). Plots are saved to folder, not Excel.
+    % FIXATION EPOCH
+    %   RTFixToSensorRelease : FIX_ACQ(2) onset -> reach-hand sensor release
+    %   MTSensorToFixHold    : sensor release -> FIX_HOL(3) onset
+    %
+    % REACH EPOCH (reaction to Go cue)
+    %   RTGoToMovement       : Go cue TAR_ACQ(4) -> on-screen fixation detach (fix exit)
+    %   MTMovementToTarget   : speed-based movement onset -> TAR_HOL(5)
+    %
+    rt_fix_sensor = get_rt_fix_to_sensor_release(trial);
+    mt_sensor_fix = get_mt_sensor_to_fix_hold(trial);
+    [rt_go_move, mt_move_target] = get_reach_epoch_timing(trial);
 
-    plot_paths = {};
-    if isempty(tbl) || ~istable(tbl) || height(tbl) == 0
+function rt_fix = get_rt_fix_to_sensor_release(trial)
+    % Latency: fixation acquired -> release of home sensor (fixation epoch, not Go).
+    rt_fix = NaN;
+    cfg = get_timing_detection_config();
+    t_fix_acq = get_fix_acq_onset(trial);
+    t_fix_hol = get_state_event_onset(trial, 3);
+    t_release = get_sensor_release_time(trial, t_fix_acq, t_fix_hol);
+    if ~isnan(t_fix_acq) && ~isnan(t_release)
+        rt_fix = sanitize_latency(t_release - t_fix_acq, cfg.min_rt_fix, cfg.max_rt_fix);
+    end
+
+function mt_fix = get_mt_sensor_to_fix_hold(trial)
+    % Movement time: sensor release -> fixation hold onset (fixation epoch).
+    mt_fix = NaN;
+    cfg = get_timing_detection_config();
+    t_fix_acq = get_fix_acq_onset(trial);
+    t_fix_hol = get_state_event_onset(trial, 3);
+    t_release = get_sensor_release_time(trial, t_fix_acq, t_fix_hol);
+    if ~isnan(t_release) && ~isnan(t_fix_hol)
+        mt_fix = sanitize_latency(t_fix_hol - t_release, cfg.min_mt_fix, cfg.max_mt_fix);
+    end
+
+function [rt_go, mt_target] = get_reach_epoch_timing(trial)
+    % Reach epoch: Go -> fixation detach (RT); movement onset -> target (MT).
+    rt_go = NaN;
+    mt_target = NaN;
+    cfg = get_timing_detection_config();
+    t_go = get_go_cue_onset(trial);
+    if isnan(t_go)
+        return;
+    end
+    % RT: unchanged — exit from on-screen fixation after Go.
+    t_detach = get_fixation_detach_time(trial, t_go);
+    if isnan(t_detach)
+        return;
+    end
+    rt_go = sanitize_latency(t_detach - t_go, cfg.min_rt_go, cfg.max_rt_go);
+    if isnan(rt_go)
+        return;
+    end
+    % MT: separate onset (speed burst at fixation), not the RT anchor.
+    t_mt_start = detect_speed_onset_near_fixation(trial, t_go, cfg);
+    if isnan(t_mt_start)
+        t_mt_start = t_detach;
+    end
+    mt_target = get_mt_movement_to_target(trial, t_mt_start);
+
+function mt_target = get_mt_movement_to_target(trial, t_move_start)
+    % Movement time: reach movement onset -> target hold.
+    mt_target = NaN;
+    if isnan(t_move_start)
+        return;
+    end
+    t_target = get_target_hold_onset_time(trial, t_move_start);
+    if isnan(t_target)
+        return;
+    end
+    cfg = get_timing_detection_config();
+    mt_target = sanitize_latency(t_target - t_move_start, cfg.min_mt_target, cfg.max_mt_target);
+
+function cfg = get_timing_detection_config()
+    % Bounds for fixation-epoch latencies.
+    cfg.min_rt_fix = 0.05;
+    cfg.max_rt_fix = 5.0;
+    cfg.min_mt_fix = 0.01;
+    cfg.max_mt_fix = 5.0;
+    % Bounds for RT to target (Go cue -> screen fixation exit).
+    cfg.min_rt_go = 0.05;
+    cfg.max_rt_go = 2.0;
+    % RT: Go cue -> fixation exit (fix_exit_radius). MT uses separate speed onset.
+    cfg.pre_go_baseline_win = 0.10;
+    cfg.fix_exit_radius = 1.2;   % leave fixation point on screen (~1 unit tolerance)
+    cfg.move_onset_speed_abs = 400;
+    cfg.move_onset_speed_margin = 150;
+    cfg.move_onset_max_disp = 2.0;  % MT start: speed burst while still at fixation
+    cfg.min_mt_target = 0.10;  % physiologically plausible minimum (~100 ms)
+    cfg.max_mt_target = 2.0;
+    % Target arrival detector (kinematic hold zone, not state-5 event time).
+    cfg.target_hold_window = 0.05;
+    cfg.target_acq_radius = 5;
+    cfg.target_sustain_samples = 3;
+
+function val = sanitize_latency(val, min_val, max_val)
+    if isnan(val) || val < min_val || val > max_val
+        val = NaN;
+    end
+
+function t_fix_acq = get_fix_acq_onset(trial)
+    % Last FIX_ACQ(2) event before TAR_ACQ(4).
+    t_fix_acq = NaN;
+    if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
+        return;
+    end
+    states = trial.states(:);
+    onsets = trial.states_onset(:);
+    idx_tar = find(states == 4, 1, 'first');
+    if isempty(idx_tar)
+        idx_fix = find(states == 2);
+    else
+        idx_fix = find(states == 2 & (1:numel(states))' < idx_tar);
+    end
+    if ~isempty(idx_fix)
+        t_fix_acq = onsets(idx_fix(end));
+    end
+
+function t_go = get_go_cue_onset(trial)
+    % Go cue: first TAR_ACQ(4) event onset.
+    t_go = get_state_event_onset(trial, 4);
+
+function t_on = get_state_event_onset(trial, state_code)
+    t_on = NaN;
+    if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
+        return;
+    end
+    states = trial.states(:);
+    onsets = trial.states_onset(:);
+    idx = find(states == state_code, 1, 'first');
+    if ~isempty(idx) && idx <= numel(onsets)
+        t_on = onsets(idx);
+    end
+
+function t_release = get_sensor_release_time(trial, t_after, t_before)
+    % First reach-hand sensor release after t_after (and before t_before if given).
+    t_release = NaN;
+    if nargin < 2 || isempty(t_after) || isnan(t_after)
+        t_after = -inf;
+    end
+    if nargin < 3
+        t_before = NaN;
+    end
+    if ~isfield(trial, 'reach_hand') || ~isfield(trial, 'tSample_from_time_start')
+        return;
+    end
+    rh = get_scalar_num_field(trial, 'reach_hand');
+    if rh == 1
+        if ~isfield(trial, 'sen_L')
+            return;
+        end
+        sen = trial.sen_L(:);
+    elseif rh == 2
+        if ~isfield(trial, 'sen_R')
+            return;
+        end
+        sen = trial.sen_R(:);
+    else
+        return;
+    end
+    t = trial.tSample_from_time_start(:);
+    if numel(sen) < 2 || numel(t) < 2
+        return;
+    end
+    n = min(numel(sen), numel(t));
+    sen = sen(1:n);
+    t = t(1:n);
+    t = align_tsample_to_state_time(trial, t);
+    rel_candidates = find(sen(1:end-1) > 0.5 & sen(2:end) <= 0.5);
+    for k = 1:numel(rel_candidates)
+        rel_idx = rel_candidates(k);
+        t_rel = t(rel_idx + 1);
+        if t_rel >= t_after && (isnan(t_before) || t_rel <= t_before)
+            t_release = t_rel;
+            return;
+        end
+    end
+
+function t_aligned = align_tsample_to_state_time(trial, t)
+    % Express tSample on the same scale/origin as states_onset.
+    t_aligned = t(:);
+    if ~isfield(trial, 'states_onset') || isempty(trial.states_onset) || numel(t_aligned) < 2
+        return;
+    end
+    state_t = trial.states_onset(:);
+    state_t = state_t(~isnan(state_t));
+    if isempty(state_t)
         return;
     end
 
-    % Aggregate across runs
-    sum_free_LL = nansum(tbl.Free_LL);
-    sum_free_LR = nansum(tbl.Free_LR);
-    sum_free_RL = nansum(tbl.Free_RL);
-    sum_free_RR = nansum(tbl.Free_RR);
-    sum_instr_LL = nansum(tbl.Instr_LL);
-    sum_instr_LR = nansum(tbl.Instr_LR);
-    sum_instr_RL = nansum(tbl.Instr_RL);
-    sum_instr_RR = nansum(tbl.Instr_RR);
+    max_state = max(state_t);
+    max_t = max(t_aligned);
 
-    total_success = nansum(tbl.SuccessfulTrials);
-    free_success = sum_free_LL + sum_free_LR + sum_free_RL + sum_free_RR;
-    instr_success = sum_instr_LL + sum_instr_LR + sum_instr_RL + sum_instr_RR;
-    free_pct = safe_pct(free_success, total_success);
-    instr_pct = safe_pct(instr_success, total_success);
-
-    % Figure: combinations (free)
-    f1 = figure('Visible','off','Position',[50 50 700 500]);
-    create_combination_plot(sum_free_LL, sum_free_LR, sum_free_RL, sum_free_RR, 'Free Choice', free_success, free_pct);
-    p1 = fullfile(out_dir, [base_name '_free_combinations.png']);
-    exportgraphics(f1, p1, 'Resolution', 200);
-    close(f1);
-    plot_paths{end+1,1} = p1;
-
-    % Figure: combinations (instructed)
-    f2 = figure('Visible','off','Position',[50 50 700 500]);
-    create_combination_plot(sum_instr_LL, sum_instr_LR, sum_instr_RL, sum_instr_RR, 'Instructed', instr_success, instr_pct);
-    p2 = fullfile(out_dir, [base_name '_instructed_combinations.png']);
-    exportgraphics(f2, p2, 'Resolution', 200);
-    close(f2);
-    plot_paths{end+1,1} = p2;
-
-    % Figure: ipsi vs contra
-    f3 = figure('Visible','off','Position',[50 50 700 500]);
-    create_ipsi_contra_plot(sum_free_LL, sum_free_LR, sum_free_RL, sum_free_RR, sum_instr_LL, sum_instr_LR, sum_instr_RL, sum_instr_RR);
-    p3 = fullfile(out_dir, [base_name '_ipsi_contra.png']);
-    exportgraphics(f3, p3, 'Resolution', 200);
-    close(f3);
-    plot_paths{end+1,1} = p3;
-
-    % Plots are saved as PNG files in the output directory
-    % No Excel sheet is created for plots
-
-function plot_paths = make_delay_duration_plots(trials_tbl, out_dir, base_name)
-    % Create logistic regression plots for delay duration vs success
-    % Input: trials_tbl - table with DelayDuration and Success columns
-    % Output: plot_paths - cell array of plot file paths
-    
-    plot_paths = {};
-    
-    % Extract delay duration and success data (exclude NaN delays)
-    valid_idx = ~isnan(trials_tbl.DelayDuration);
-    delay_durations = trials_tbl.DelayDuration(valid_idx);
-    success = double(trials_tbl.Success(valid_idx));  % Ensure numeric 0/1
-    
-    if sum(valid_idx) < 10  % Need at least 10 data points for meaningful analysis
-        return;  % Not enough data
+    % Only rescale when one stream is clearly in seconds and the other in ms.
+    if max_state > 100 && max_t > 0 && max_t <= 60
+        t_aligned = t_aligned * 1000;
+    elseif max_state > 0 && max_state <= 60 && max_t > 100
+        t_aligned = t_aligned / 1000;
     end
-    
-    % Check if we have variation in success (need both 0s and 1s for logistic regression)
-    if all(success == 0) || all(success == 1)
-        % Create simple histogram plot plus time-until-abort histogram
-        fig = figure('Visible','off','Position',[50 50 1200 500]);
-        subplot(1, 2, 1);
-        histogram(delay_durations, 20, 'FaceColor', [0.5 0.5 0.5], 'EdgeColor', 'black');
-        xlabel('Delay Duration (s)', 'FontWeight', 'bold');
-        ylabel('Number of Trials', 'FontWeight', 'bold');
-        if all(success == 1)
-            status_str = 'successful';
-        else
-            status_str = 'failed';
+
+    offset = NaN;
+    if isfield(trial, 'states') && isfield(trial, 'state') && ~isempty(trial.state)
+        state_events = trial.states(:);
+        event_onsets = trial.states_onset(:);
+        state_samples = trial.state(:);
+        n_samp = min(numel(t_aligned), numel(state_samples));
+        anchor_codes = [4, 2, 3, 5];
+        for code = anchor_codes
+            idx_evt = find(state_events == code, 1, 'first');
+            idx_samp = find(state_samples(1:n_samp) == code, 1, 'first');
+            if ~isempty(idx_evt) && ~isempty(idx_samp) && idx_evt <= numel(event_onsets)
+                offset = event_onsets(idx_evt) - t_aligned(idx_samp);
+                break;
+            end
         end
-        title(sprintf('Delay Duration Distribution: %s\n(All trials %s)', base_name, status_str), ...
-            'FontSize', 12, 'FontWeight', 'bold');
-        grid on;
-        subplot(1, 2, 2);
-        idx_abort_del = contains(lower(string(trials_tbl.reason_of_abort)), 'abort_hnd_del_per_state') & ~isnan(trials_tbl.TimeUntilAbort);
-        time_until_abort = trials_tbl.TimeUntilAbort(idx_abort_del);
-        if ~isempty(time_until_abort)
-            histogram(time_until_abort, 20, 'FaceColor', [0.8 0.4 0.2], 'EdgeColor', 'black');
-            xlabel('Time until abort (s)', 'FontWeight', 'bold');
-            ylabel('Number of trials', 'FontWeight', 'bold');
-            title(sprintf('Time until abort (abort\\_hnd\\_del\\_per\\_state)\nn = %d', numel(time_until_abort)), 'FontSize', 12, 'FontWeight', 'bold');
-            grid on;
-        else
-            text(0.5, 0.5, 'No abort\_hnd\_del\_per\_state trials', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
-        end
-        plot_path = fullfile(out_dir, [base_name '_delay_duration_histogram.png']);
-        exportgraphics(fig, plot_path, 'Resolution', 200);
-        close(fig);
-        plot_paths{end+1,1} = plot_path;
+    end
+
+    if isnan(offset)
+        offset = state_t(1) - t_aligned(1);
+    end
+    if abs(offset) > 1e-6
+        t_aligned = t_aligned + offset;
+    end
+
+function [t, x, y, state] = get_aligned_hand_kinematics(trial)
+    t = trial.tSample_from_time_start(:);
+    x = trial.x_hnd(:);
+    y = trial.y_hnd(:);
+    state = [];
+    if isfield(trial, 'state') && ~isempty(trial.state)
+        state = trial.state(:);
+    end
+    n = min([numel(t), numel(x), numel(y)]);
+    if ~isempty(state)
+        n = min(n, numel(state));
+    end
+    t = align_tsample_to_state_time(trial, t(1:n));
+    x = x(1:n);
+    y = y(1:n);
+    if ~isempty(state)
+        state = state(1:n);
+    end
+    valid = ~isnan(x) & ~isnan(y) & ~isnan(t);
+    t = t(valid);
+    x = x(valid);
+    y = y(valid);
+    if ~isempty(state)
+        state = state(valid);
+    end
+
+function [t, x, y, speed] = get_hand_speed_profile(trial)
+    [t, x, y, ~] = get_aligned_hand_kinematics(trial);
+    speed = [];
+    if numel(t) < 2
         return;
     end
-    
-    % Perform logistic regression
+    dt = diff(t);
+    speed = sqrt(diff(x).^2 + diff(y).^2) ./ max(dt, eps);
+
+function [xh, yh] = get_target_hold_position(trial)
+    % Target hold zone center from kinematics (not state-5 event time).
+    xh = NaN;
+    yh = NaN;
+    cfg = get_timing_detection_config();
+    [t, x, y, state] = get_aligned_hand_kinematics(trial);
+    if isempty(t)
+        return;
+    end
+
+    hold_mask = [];
+    if ~isempty(state)
+        hold_mask = state == 5;
+    end
+    if any(hold_mask)
+        t_hold = t(hold_mask);
+        final_mask = hold_mask & t >= (max(t_hold) - cfg.target_hold_window);
+        if ~any(final_mask)
+            final_mask = hold_mask;
+        end
+    else
+        final_mask = t >= (max(t) - cfg.target_hold_window);
+    end
+
+    if ~any(final_mask)
+        return;
+    end
+    xh = median(x(final_mask));
+    yh = median(y(final_mask));
+
+function t_detach = get_fixation_detach_time(trial, t_go)
+    % Hand detach from on-screen fixation after Go (RT endpoint).
+    t_detach = NaN;
+    if ~isfield(trial, 'x_hnd') || ~isfield(trial, 'y_hnd') || ~isfield(trial, 'tSample_from_time_start')
+        return;
+    end
+    if isnan(t_go)
+        return;
+    end
+    t_detach = detect_fixation_detach_after_go(trial, t_go, get_timing_detection_config());
+
+function t_move = get_movement_initiation_time(trial, t_go)
+    % Backward-compatible alias for fixation detach time.
+    t_move = get_fixation_detach_time(trial, t_go);
+
+function t_on = detect_speed_onset_near_fixation(trial, t_go, cfg)
+    % First high-velocity sample while hand is still at screen fixation (MT start).
+    t_on = NaN;
+    [t, x, y, ~] = get_aligned_hand_kinematics(trial);
+    if numel(t) < 4 || isnan(t_go)
+        return;
+    end
+
+    spd = zeros(numel(t), 1);
+    for j = 2:numel(t)
+        dt = max(t(j) - t(j - 1), eps);
+        spd(j) = hypot(x(j) - x(j - 1), y(j) - y(j - 1)) / dt;
+    end
+
+    pre_mask = t >= (t_go - cfg.pre_go_baseline_win) & t < t_go;
+    if ~any(pre_mask)
+        return;
+    end
+    x0 = median(x(pre_mask));
+    y0 = median(y(pre_mask));
+    dist = hypot(x - x0, y - y0);
+    base_spd = median(spd(pre_mask));
+    speed_thr = max(cfg.move_onset_speed_abs, base_spd + cfg.move_onset_speed_margin);
+
+    t_earliest = t_go + cfg.min_rt_go;
+    t_latest = t_go + cfg.max_rt_go;
+    t_tar_hol = get_state_event_onset(trial, 5);
+    if ~isnan(t_tar_hol)
+        t_latest = min(t_latest, t_tar_hol);
+    end
+
+    idx = find(t >= t_earliest & t <= t_latest & ...
+        spd >= speed_thr & dist < cfg.move_onset_max_disp, 1, 'first');
+    if ~isempty(idx)
+        t_on = t(idx);
+    end
+
+function t_detach = detect_fixation_detach_after_go(trial, t_go, cfg)
+    % First on-screen fixation detach/movement after Go (RT endpoint).
+    t_detach = NaN;
+    [t, x, y, ~] = get_aligned_hand_kinematics(trial);
+    if numel(t) < 3 || isnan(t_go)
+        return;
+    end
+
+    pre_mask = t >= (t_go - cfg.pre_go_baseline_win) & t < t_go;
+    if ~any(pre_mask)
+        return;
+    end
+    x0 = median(x(pre_mask));
+    y0 = median(y(pre_mask));
+
+    t_earliest = t_go + cfg.min_rt_go;
+    t_latest = t_go + cfg.max_rt_go;
+    t_tar_hol = get_state_event_onset(trial, 5);
+    if ~isnan(t_tar_hol)
+        t_latest = min(t_latest, t_tar_hol);
+    end
+
+    idx = find(t >= t_earliest & t <= t_latest & ...
+        hypot(x - x0, y - y0) >= cfg.fix_exit_radius, 1, 'first');
+    if ~isempty(idx)
+        t_detach = t(idx);
+    end
+
+function t_target = get_target_hold_onset_time(trial, t_detach)
+    % Target hold onset for MT (search begins at detach, inclusive).
+    t_target = NaN;
+    if isnan(t_detach)
+        return;
+    end
+
+    t_tar_hol = get_state_event_onset(trial, 5);
+    if ~isnan(t_tar_hol) && t_tar_hol >= t_detach
+        t_target = t_tar_hol;
+        return;
+    end
+
+    t_target = get_kinematic_target_arrival_time(trial, t_detach);
+
+function t_target = get_kinematic_target_arrival_time(trial, t_detach)
+    % Kinematic target arrival at/after detach (fallback when state 5 is missing).
+    t_target = NaN;
+    if isnan(t_detach) || ~isfield(trial, 'x_hnd') || ~isfield(trial, 'y_hnd')
+        return;
+    end
+
+    cfg = get_timing_detection_config();
+    [xh, yh] = get_target_hold_position(trial);
+    if isnan(xh) || isnan(yh)
+        return;
+    end
+
+    [t, x, y, ~] = get_aligned_hand_kinematics(trial);
+    onset_idx = find(t >= t_detach, 1, 'first');
+    if isempty(onset_idx)
+        return;
+    end
+
+    n_sustain = cfg.target_sustain_samples;
+    for k = onset_idx:(numel(t) - n_sustain + 1)
+        in_zone = hypot(x(k:(k + n_sustain - 1)) - xh, y(k:(k + n_sustain - 1)) - yh) <= cfg.target_acq_radius;
+        if all(in_zone)
+            t_target = t(k);
+            return;
+        end
+    end
+
+function plot_paths = make_block_analysis_figure(trials_tbl, summary_tbl, out_dir, base_name)
+    % Combined figure: free/instructed combinations and ipsi/contra choice counts.
+    plot_paths = {};
+    if isempty(summary_tbl)
+        return;
+    end
+
+    [combo_labels, combo_keys, combo_colors] = get_hand_target_plot_config();
+    counts = aggregate_combination_counts(summary_tbl);
+
+    fig = figure('Visible', 'off', 'Position', [50 50 1600 550]);
+
+    subplot(1, 3, 1);
+    plot_combination_bars(counts.free_LL, counts.free_LR, counts.free_RL, counts.free_RR, ...
+        combo_labels, combo_colors, 'Free Choice');
+
+    subplot(1, 3, 2);
+    plot_combination_bars(counts.instr_LL, counts.instr_LR, counts.instr_RL, counts.instr_RR, ...
+        combo_labels, combo_colors, 'Instructed');
+
+    subplot(1, 3, 3);
+    plot_ipsi_contra_bars(counts.free_LL, counts.free_LR, counts.free_RL, counts.free_RR, ...
+        counts.instr_LL, counts.instr_LR, counts.instr_RL, counts.instr_RR);
+
+    sgtitle(sprintf('Reach Analysis: %s', base_name), 'FontSize', 14, 'FontWeight', 'bold');
+
+    plot_path = fullfile(out_dir, [base_name '.png']);
     try
-        % Fit logistic regression model: logit(P(success)) = b0 + b1*delay_duration
-        % Using glmfit with binomial distribution
-        [b, dev, stats] = glmfit(delay_durations, success, 'binomial', 'link', 'logit');
-        
-        % Create smooth curve for plotting
-        delay_range = linspace(min(delay_durations), max(delay_durations), 200);
-        logit_pred = b(1) + b(2) * delay_range;
-        prob_pred = 1 ./ (1 + exp(-logit_pred));  % Inverse logit
-        
-        % Create figure with multiple subplots (2x3 to add time-until-abort histogram)
-        fig = figure('Visible','off','Position',[50 50 1400 1000]);
-        
-        % Subplot 1: Logistic regression curve with data points
-        subplot(2, 3, 1);
-        scatter(delay_durations, success, 50, 'filled', 'MarkerFaceAlpha', 0.6);
-        hold on;
-        plot(delay_range, prob_pred, 'r-', 'LineWidth', 2);
-        xlabel('Delay Duration (s)', 'FontWeight', 'bold');
-        ylabel('Success Probability', 'FontWeight', 'bold');
-        title(sprintf('Logistic Regression: Delay Duration vs Success\nβ₀=%.3f, β₁=%.3f (p=%.4f)', ...
-            b(1), b(2), stats.p(2)), 'FontSize', 12, 'FontWeight', 'bold');
-        legend('Data', 'Logistic Fit', 'Location', 'best');
-        grid on;
-        ylim([-0.1 1.1]);
-        
-        % Subplot 2: Delay duration distributions for successful vs failed trials
-        subplot(2, 3, 2);
-        success_delays = delay_durations(success == 1);
-        fail_delays = delay_durations(success == 0);
-        if ~isempty(success_delays) && ~isempty(fail_delays)
-            histogram(success_delays, 'FaceColor', [0 0.8 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-            hold on;
-            histogram(fail_delays, 'FaceColor', [0.8 0 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-            xlabel('Delay Duration (s)', 'FontWeight', 'bold');
-            ylabel('Number of Trials', 'FontWeight', 'bold');
-            title('Delay Duration Distribution', 'FontSize', 12, 'FontWeight', 'bold');
-            legend(sprintf('Success (n=%d)', length(success_delays)), ...
-                   sprintf('Failed (n=%d)', length(fail_delays)), 'Location', 'best');
-            grid on;
-        end
-        
-        % Subplot 3: Success rate by delay duration bins
-        subplot(2, 3, 3);
-        n_bins = 10;
-        bin_edges = linspace(min(delay_durations), max(delay_durations), n_bins+1);
-        bin_centers = (bin_edges(1:end-1) + bin_edges(2:end)) / 2;
-        success_rate = zeros(n_bins, 1);
-        bin_counts = zeros(n_bins, 1);
-        for i = 1:n_bins
-            bin_idx = delay_durations >= bin_edges(i) & delay_durations < bin_edges(i+1);
-            if i == n_bins  % Include right edge for last bin
-                bin_idx = delay_durations >= bin_edges(i) & delay_durations <= bin_edges(i+1);
-            end
-            if sum(bin_idx) > 0
-                success_rate(i) = mean(success(bin_idx));
-                bin_counts(i) = sum(bin_idx);
-            else
-                success_rate(i) = NaN;
-            end
-        end
-        valid_bins = ~isnan(success_rate);
-        bar(bin_centers(valid_bins), success_rate(valid_bins), 'FaceColor', [0.2 0.6 0.8]);
-        hold on;
-        plot(delay_range, prob_pred, 'r-', 'LineWidth', 2);
-        xlabel('Delay Duration (s)', 'FontWeight', 'bold');
-        ylabel('Success Rate', 'FontWeight', 'bold');
-        title('Success Rate by Delay Duration Bins', 'FontSize', 12, 'FontWeight', 'bold');
-        legend('Binned Success Rate', 'Logistic Fit', 'Location', 'best');
-        grid on;
-        ylim([0 1]);
-        
-        % Subplot 4: Summary statistics
-        subplot(2, 3, 4);
-        axis off;
-        stats_text = sprintf('LOGISTIC REGRESSION SUMMARY\n');
-        stats_text = [stats_text sprintf('========================\n\n')];
-        stats_text = [stats_text sprintf('Total trials with delay: %d\n', length(delay_durations))];
-        stats_text = [stats_text sprintf('Successful: %d (%.1f%%)\n', sum(success), mean(success)*100)];
-        stats_text = [stats_text sprintf('Failed: %d (%.1f%%)\n\n', sum(~success), mean(~success)*100)];
-        stats_text = [stats_text sprintf('Delay Duration Statistics:\n')];
-        stats_text = [stats_text sprintf('  Mean: %.3f s\n', mean(delay_durations))];
-        stats_text = [stats_text sprintf('  Median: %.3f s\n', median(delay_durations))];
-        stats_text = [stats_text sprintf('  Range: [%.3f, %.3f] s\n\n', min(delay_durations), max(delay_durations))];
-        stats_text = [stats_text sprintf('Logistic Regression:\n')];
-        stats_text = [stats_text sprintf('  Intercept (β₀): %.3f (p=%.4f)\n', b(1), stats.p(1))];
-        stats_text = [stats_text sprintf('  Slope (β₁): %.3f (p=%.4f)\n', b(2), stats.p(2))];
-        stats_text = [stats_text sprintf('  Deviance: %.2f\n', dev)];
-        if stats.p(2) < 0.05
-            stats_text = [stats_text sprintf('  Significance: ** p < 0.05\n')];
-        elseif stats.p(2) < 0.01
-            stats_text = [stats_text sprintf('  Significance: *** p < 0.01\n')];
-        else
-            stats_text = [stats_text sprintf('  Significance: ns (p >= 0.05)\n')];
-        end
-        text(0.1, 0.5, stats_text, 'FontSize', 10, ...
-             'VerticalAlignment', 'middle', 'HorizontalAlignment', 'left');
-        
-        % Subplot 5: Histogram of time until abort for abort_hnd_del_per_state failures
-        subplot(2, 3, 5);
-        idx_abort_del = contains(lower(string(trials_tbl.reason_of_abort)), 'abort_hnd_del_per_state') & ~isnan(trials_tbl.TimeUntilAbort);
-        time_until_abort = trials_tbl.TimeUntilAbort(idx_abort_del);
-        if ~isempty(time_until_abort)
-            histogram(time_until_abort, 20, 'FaceColor', [0.8 0.4 0.2], 'EdgeColor', 'black');
-            xlabel('Time until abort (s)', 'FontWeight', 'bold');
-            ylabel('Number of trials', 'FontWeight', 'bold');
-            title(sprintf('Time until abort (abort\\_hnd\\_del\\_per\\_state)\nn = %d', numel(time_until_abort)), 'FontSize', 12, 'FontWeight', 'bold');
-            grid on;
-        else
-            text(0.5, 0.5, 'No abort\_hnd\_del\_per\_state trials', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
-        end
-        
-        sgtitle(sprintf('Delay Duration Analysis: %s', base_name), 'FontSize', 14, 'FontWeight', 'bold');
-        
-        % Save plot
-        plot_path = fullfile(out_dir, [base_name '_delay_duration_logistic.png']);
-        try
-            exportgraphics(fig, plot_path, 'Resolution', 200);
-        catch
-            % Fallback for older MATLAB versions
-            print(fig, plot_path, '-dpng', '-r200');
-        end
-        close(fig);
-        plot_paths{end+1,1} = plot_path;
-        
-    catch ME
-        warning('Could not perform logistic regression: %s', ME.message);
-        % Create a simple histogram plot as fallback
-        try
-            fig = figure('Visible','off','Position',[50 50 1000 600]);
-            success_delays = delay_durations(success == 1);
-            fail_delays = delay_durations(success == 0);
-            if ~isempty(success_delays) && ~isempty(fail_delays)
-                histogram(success_delays, 'FaceColor', [0 0.8 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-                hold on;
-                histogram(fail_delays, 'FaceColor', [0.8 0 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-                xlabel('Delay Duration (s)', 'FontWeight', 'bold');
-                ylabel('Number of Trials', 'FontWeight', 'bold');
-                title(sprintf('Delay Duration Distribution: %s\n(Logistic regression failed)', base_name), ...
-                    'FontSize', 12, 'FontWeight', 'bold');
-                legend(sprintf('Success (n=%d)', length(success_delays)), ...
-                       sprintf('Failed (n=%d)', length(fail_delays)), 'Location', 'best');
-                grid on;
-            end
-            plot_path = fullfile(out_dir, [base_name '_delay_duration_histogram.png']);
-            try
-                exportgraphics(fig, plot_path, 'Resolution', 200);
-            catch
-                print(fig, plot_path, '-dpng', '-r200');
-            end
-            close(fig);
-            plot_paths{end+1,1} = plot_path;
-        catch
-            % Skip if plotting fails
-        end
-    end
-
-function plot_paths = make_target_acquisition_plots(trials_tbl, out_dir, base_name)
-    % Same analysis as Delay Duration but for hand movement time (delay end → target hold). Save as image.
-    plot_paths = {};
-    valid_idx = ~isnan(trials_tbl.TargetAcqTime);
-    target_acq_times = trials_tbl.TargetAcqTime(valid_idx);
-    success = double(trials_tbl.Success(valid_idx));
-    
-    if sum(valid_idx) < 10
-        return;
-    end
-    
-    if all(success == 0) || all(success == 1)
-        fig = figure('Visible','off','Position',[50 50 1000 600]);
-        histogram(target_acq_times, 20, 'FaceColor', [0.5 0.5 0.5], 'EdgeColor', 'black');
-        xlabel('Hand movement time (s)', 'FontWeight', 'bold');
-        ylabel('Number of Trials', 'FontWeight', 'bold');
-        status_str = 'failed';
-        if all(success == 1)
-            status_str = 'successful';
-        end
-        title(sprintf('Hand movement time (delay end \\rightarrow target hold): %s\n(All trials %s)', base_name, status_str), 'FontSize', 12, 'FontWeight', 'bold');
-        grid on;
-        plot_path = fullfile(out_dir, [base_name '_target_acquisition_time_histogram.png']);
         exportgraphics(fig, plot_path, 'Resolution', 200);
-        close(fig);
-        plot_paths{end+1,1} = plot_path;
+    catch
+        print(fig, plot_path, '-dpng', '-r200');
+    end
+    close(fig);
+    plot_paths{end+1, 1} = plot_path;
+
+function counts = aggregate_combination_counts(summary_tbl)
+    counts = struct();
+    counts.free_LL = nansum(summary_tbl.Free_LL);
+    counts.free_LR = nansum(summary_tbl.Free_LR);
+    counts.free_RL = nansum(summary_tbl.Free_RL);
+    counts.free_RR = nansum(summary_tbl.Free_RR);
+    counts.instr_LL = nansum(summary_tbl.Instr_LL);
+    counts.instr_LR = nansum(summary_tbl.Instr_LR);
+    counts.instr_RL = nansum(summary_tbl.Instr_RL);
+    counts.instr_RR = nansum(summary_tbl.Instr_RR);
+
+function [combo_labels, combo_keys, combo_colors] = get_hand_target_plot_config()
+    color_left_hand = [0.4, 0.8, 1.0];   % blue
+    color_right_hand = [0.2, 0.8, 0.4];  % green
+    combo_labels = { ...
+        'Left hand – left target', ...
+        'Left hand – right target', ...
+        'Right hand – left target', ...
+        'Right hand – right target'};
+    combo_keys = {'Left|Left', 'Left|Right', 'Right|Left', 'Right|Right'};
+    combo_colors = [ ...
+        color_left_hand; ...
+        min(color_left_hand + 0.15, 1); ...
+        min(color_right_hand + 0.15, 1); ...
+        color_right_hand];
+
+function plot_combination_bars(LL, LR, RL, RR, labels, colors, title_str)
+    data = [LL, LR, RL, RR];
+    if sum(data) == 0
+        text(0.5, 0.5, 'No data available', 'HorizontalAlignment', 'center', ...
+            'VerticalAlignment', 'middle', 'FontWeight', 'bold');
+        axis off;
+        title(title_str, 'FontSize', 11, 'FontWeight', 'bold');
         return;
     end
-    
-    try
-        [b, dev, stats] = glmfit(target_acq_times, success, 'binomial', 'link', 'logit');
-        time_range = linspace(min(target_acq_times), max(target_acq_times), 200);
-        logit_pred = b(1) + b(2) * time_range;
-        prob_pred = 1 ./ (1 + exp(-logit_pred));
-        
-        fig = figure('Visible','off','Position',[50 50 1400 1000]);
-        
-        subplot(2, 2, 1);
-        scatter(target_acq_times, success, 50, 'filled', 'MarkerFaceAlpha', 0.6);
-        hold on;
-        plot(time_range, prob_pred, 'r-', 'LineWidth', 2);
-        xlabel('Hand movement time (s)', 'FontWeight', 'bold');
-        ylabel('Success Probability', 'FontWeight', 'bold');
-        title(sprintf('Logistic Regression: Hand movement time vs Success\nβ₀=%.3f, β₁=%.3f (p=%.4f)', b(1), b(2), stats.p(2)), 'FontSize', 12, 'FontWeight', 'bold');
-        legend('Data', 'Logistic Fit', 'Location', 'best');
-        grid on;
-        ylim([-0.1 1.1]);
-        
-        subplot(2, 2, 2);
-        success_times = target_acq_times(success == 1);
-        fail_times = target_acq_times(success == 0);
-        if ~isempty(success_times) && ~isempty(fail_times)
-            histogram(success_times, 'FaceColor', [0 0.8 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-            hold on;
-            histogram(fail_times, 'FaceColor', [0.8 0 0], 'FaceAlpha', 0.6, 'EdgeColor', 'black');
-            xlabel('Hand movement time (s)', 'FontWeight', 'bold');
-            ylabel('Number of Trials', 'FontWeight', 'bold');
-            title('Hand movement time distribution', 'FontSize', 12, 'FontWeight', 'bold');
-            legend(sprintf('Success (n=%d)', length(success_times)), sprintf('Failed (n=%d)', length(fail_times)), 'Location', 'best');
-            grid on;
+
+    x = 1:4;
+    bh = bar(x, data, 0.65, 'FaceColor', 'flat');
+    for i = 1:4
+        bh.CData(i, :) = colors(i, :);
+    end
+    hold on;
+    total = sum(data);
+    for i = 1:4
+        if data(i) > 0
+            pct = data(i) / total * 100;
+            text(x(i), data(i), sprintf('%d\n(%.1f%%)', data(i), pct), ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                'FontWeight', 'bold', 'FontSize', 9);
         end
-        
-        subplot(2, 2, 3);
-        n_bins = 10;
-        bin_edges = linspace(min(target_acq_times), max(target_acq_times), n_bins+1);
-        bin_centers = (bin_edges(1:end-1) + bin_edges(2:end)) / 2;
-        success_rate = zeros(n_bins, 1);
-        for i = 1:n_bins
-            bin_idx = target_acq_times >= bin_edges(i) & target_acq_times < bin_edges(i+1);
-            if i == n_bins
-                bin_idx = target_acq_times >= bin_edges(i) & target_acq_times <= bin_edges(i+1);
+    end
+    set(gca, 'XTick', x, 'XTickLabel', labels, 'FontWeight', 'bold');
+    xtickangle(20);
+    ylabel('Number of trials', 'FontWeight', 'bold');
+    title(sprintf('%s\n(n = %d)', title_str, total), 'FontSize', 11, 'FontWeight', 'bold');
+    grid on;
+
+function plot_ipsi_contra_bars(free_LL, free_LR, free_RL, free_RR, instr_LL, instr_LR, instr_RL, instr_RR)
+    color_ipsi = [1.0, 1.0, 0.0];      % yellow
+    color_contra = [0.9, 0.2, 0.2];    % red
+    task_labels = {'Free Choice', 'Instructed'};
+    data = [free_LL + free_RR, free_LR + free_RL; instr_LL + instr_RR, instr_LR + instr_RL];
+
+    x = 1:2;
+    hold on;
+    bh1 = bar(x - 0.18, data(:, 1), 0.34, 'FaceColor', color_ipsi, 'EdgeColor', 'k');
+    bh2 = bar(x + 0.18, data(:, 2), 0.34, 'FaceColor', color_contra, 'EdgeColor', 'k');
+    set(gca, 'XTick', x, 'XTickLabel', task_labels, 'FontWeight', 'bold');
+    ylabel('Number of trials', 'FontWeight', 'bold');
+    title('Ipsilateral vs Contralateral Choice', 'FontSize', 11, 'FontWeight', 'bold');
+    legend([bh1, bh2], {'Ipsilateral', 'Contralateral'}, 'Location', 'best');
+    grid on;
+
+    for i = 1:2
+        row_total = sum(data(i, :));
+        for j = 1:2
+            if data(i, j) > 0 && row_total > 0
+                pct = data(i, j) / row_total * 100;
+                x_pos = i + (j - 1.5) * 0.18;
+                text(x_pos, data(i, j), sprintf('%d\n(%.1f%%)', data(i, j), pct), ...
+                    'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                    'FontWeight', 'bold', 'FontSize', 9);
             end
-            if sum(bin_idx) > 0
-                success_rate(i) = mean(success(bin_idx));
-            else
-                success_rate(i) = NaN;
-            end
         end
-        valid_bins = ~isnan(success_rate);
-        bar(bin_centers(valid_bins), success_rate(valid_bins), 'FaceColor', [0.2 0.6 0.8]);
-        hold on;
-        plot(time_range, prob_pred, 'r-', 'LineWidth', 2);
-        xlabel('Hand movement time (s)', 'FontWeight', 'bold');
-        ylabel('Success Rate', 'FontWeight', 'bold');
-        title('Success Rate by Hand movement time Bins', 'FontSize', 12, 'FontWeight', 'bold');
-        legend('Binned Success Rate', 'Logistic Fit', 'Location', 'best');
-        grid on;
-        ylim([0 1]);
-        
-        subplot(2, 2, 4);
-        axis off;
-        stats_text = sprintf('HAND MOVEMENT TIME SUMMARY\n(delay end \\rightarrow target hold)\n');
-        stats_text = [stats_text sprintf('====================================\n\n')];
-        stats_text = [stats_text sprintf('Total trials with movement time: %d\n', length(target_acq_times))];
-        stats_text = [stats_text sprintf('Successful: %d (%.1f%%)\n', sum(success), mean(success)*100)];
-        stats_text = [stats_text sprintf('Failed: %d (%.1f%%)\n\n', sum(~success), mean(~success)*100)];
-        stats_text = [stats_text sprintf('Hand movement time Statistics:\n')];
-        stats_text = [stats_text sprintf('  Mean: %.3f s\n', mean(target_acq_times))];
-        stats_text = [stats_text sprintf('  Median: %.3f s\n', median(target_acq_times))];
-        stats_text = [stats_text sprintf('  Range: [%.3f, %.3f] s\n\n', min(target_acq_times), max(target_acq_times))];
-        stats_text = [stats_text sprintf('Logistic Regression:\n')];
-        stats_text = [stats_text sprintf('  Intercept (β₀): %.3f (p=%.4f)\n', b(1), stats.p(1))];
-        stats_text = [stats_text sprintf('  Slope (β₁): %.3f (p=%.4f)\n', b(2), stats.p(2))];
-        stats_text = [stats_text sprintf('  Deviance: %.2f\n', dev)];
-        if stats.p(2) < 0.05
-            stats_text = [stats_text sprintf('  Significance: ** p < 0.05\n')];
-        elseif stats.p(2) < 0.01
-            stats_text = [stats_text sprintf('  Significance: *** p < 0.01\n')];
-        else
-            stats_text = [stats_text sprintf('  Significance: ns (p >= 0.05)\n')];
-        end
-        text(0.1, 0.5, stats_text, 'FontSize', 10, 'VerticalAlignment', 'middle', 'HorizontalAlignment', 'left');
-        
-        sgtitle(sprintf('Hand movement time Analysis (delay end \\rightarrow target hold): %s', base_name), 'FontSize', 14, 'FontWeight', 'bold');
-        plot_path = fullfile(out_dir, [base_name '_target_acquisition_time_logistic.png']);
-        try
-            exportgraphics(fig, plot_path, 'Resolution', 200);
-        catch
-            print(fig, plot_path, '-dpng', '-r200');
-        end
-        close(fig);
-        plot_paths{end+1,1} = plot_path;
-    catch ME
-        warning('Could not perform target acquisition time analysis: %s', ME.message);
     end
 
-function write_tables_to_excel(excel_path, before_tbl, after_tbl, before_trials_tbl, after_trials_tbl)
-    % Overwrite existing file
+function plot_go_reaction_timeline(trials_tbl, combo_keys, combo_labels, combo_colors)
+    % trials_tbl: successful free-choice trials with complete RT/MT metrics.
+    if isempty(trials_tbl) || height(trials_tbl) == 0
+        text(0.5, 0.5, 'No successful free-choice trials', 'HorizontalAlignment', 'center');
+        axis off;
+        return;
+    end
+
+    sorted_tbl = sortrows(trials_tbl, {'Run', 'Trial'});
+    n_trials = height(sorted_tbl);
+    if n_trials < 1
+        text(0.5, 0.5, 'No free-choice trials', 'HorizontalAlignment', 'center');
+        axis off;
+        return;
+    end
+
+    trial_idx = (1:n_trials)';
+    hold on;
+    legend_entries = {};
+    for g = 1:numel(combo_keys)
+        parts = split(combo_keys{g}, '|');
+        combo_mask = sorted_tbl.Hand == parts{1} & sorted_tbl.Target == parts{2};
+        if ~any(combo_mask)
+            continue;
+        end
+        combo_trials = trial_idx(combo_mask);
+        combo_rts = sorted_tbl.RTGoToMovement(combo_mask);
+        plot(combo_trials, combo_rts, '-o', 'LineWidth', 1.8, ...
+            'Color', combo_colors(g, :), 'MarkerFaceColor', combo_colors(g, :), ...
+            'MarkerSize', 4);
+        legend_entries{end+1} = combo_labels{g}; %#ok<AGROW>
+    end
+
+    xlabel('Trial', 'FontWeight', 'bold');
+    ylabel('RT to target (s)', 'FontWeight', 'bold');
+    title('RT to Target Over Trials (Go \rightarrow Fix Exit)', 'FontSize', 11, 'FontWeight', 'bold');
+    xlim([0.5, n_trials + 0.5]);
+    grid on;
+    if ~isempty(legend_entries)
+        legend(legend_entries, 'Location', 'best');
+    else
+        text(0.5, 0.5, 'No successful free-choice Go RT data', ...
+            'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+    end
+
+function plot_paths = make_free_choice_timing_figure(trials_tbl, summary_tbl, out_dir, base_name)
+    % Timing figure: fixation-epoch latencies, Go reaction time, movement time, success rates.
+    plot_paths = {};
+    if isempty(trials_tbl) || height(trials_tbl) == 0
+        return;
+    end
+
+    [combo_labels, combo_keys, combo_colors] = get_hand_target_plot_config();
+    color_left_hand = combo_colors(1, :);
+    color_right_hand = combo_colors(4, :);
+
+    free_tbl = trials_tbl(trials_tbl.TaskType == "Free", :);
+    if isempty(free_tbl)
+        return;
+    end
+
+    success_free = free_tbl(free_tbl.Success == 1, :);
+    % Use the same successful free-choice cohort on all RT/MT panels.
+    success_free = subset_trials_with_complete_timing(success_free);
+    if isempty(success_free)
+        return;
+    end
+
+    fig = figure('Visible', 'off', 'Position', [50 50 1600 1000]);
+
+    subplot(2, 3, 1);
+    groups_hand = ["Left", "Right"];
+    [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'RTFixToSensorRelease', groups_hand);
+    trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'RTFixToSensorRelease');
+    plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
+        [color_left_hand; color_right_hand], 'RT: Fixation \rightarrow Sensor Release', 'Time (s)', trial_pts);
+
+    subplot(2, 3, 2);
+    [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'MTSensorToFixHold', groups_hand);
+    trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'MTSensorToFixHold');
+    plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
+        [color_left_hand; color_right_hand], 'MT: Sensor Release \rightarrow Fix Hold', 'Time (s)', trial_pts);
+
+    subplot(2, 3, 3);
+    [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'RTGoToMovement');
+    trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'RTGoToMovement');
+    plot_hand_bar(means, sems, ns, combo_labels, combo_colors, 'RT to Target (Go \rightarrow Fix Exit)', 'Time (s)', trial_pts);
+
+    subplot(2, 3, 4);
+    [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'MTMovementToTarget');
+    trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'MTMovementToTarget');
+    plot_hand_bar(means, sems, ns, combo_labels, combo_colors, 'MT: Fix Exit \rightarrow Target', 'Time (s)', trial_pts);
+
+    subplot(2, 3, 5);
+    plot_go_reaction_timeline(success_free, combo_keys, combo_labels, combo_colors);
+
+    subplot(2, 3, 6);
+    plot_instructed_vs_choice_success(summary_tbl, color_left_hand, color_right_hand);
+
+    sgtitle(sprintf('Timing Analysis (Free Choice): %s', base_name), ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+    plot_path = fullfile(out_dir, [base_name '_free_choice_timing.png']);
+    try
+        exportgraphics(fig, plot_path, 'Resolution', 200);
+    catch
+        print(fig, plot_path, '-dpng', '-r200');
+    end
+    close(fig);
+    plot_paths{end+1, 1} = plot_path;
+
+function timing_fields = get_timing_metric_fields()
+    timing_fields = {'RTFixToSensorRelease', 'MTSensorToFixHold', ...
+        'RTGoToMovement', 'MTMovementToTarget'};
+
+function mask = complete_timing_mask(tbl)
+    % True for trials with all RT/MT metrics available.
+    mask = true(height(tbl), 1);
+    if isempty(tbl)
+        return;
+    end
+    timing_fields = get_timing_metric_fields();
+    for k = 1:numel(timing_fields)
+        mask = mask & ~isnan(tbl.(timing_fields{k}));
+    end
+
+function tbl = subset_trials_with_complete_timing(tbl)
+    tbl = tbl(complete_timing_mask(tbl), :);
+
+function [means, sems, ns] = mean_sem_by_group(tbl, group_field, value_field, groups)
+    n_groups = numel(groups);
+    means = nan(n_groups, 1);
+    sems = nan(n_groups, 1);
+    ns = zeros(n_groups, 1);
+    for g = 1:n_groups
+        idx = tbl.(group_field) == groups(g) & tbl.Success == 1 & ~isnan(tbl.(value_field));
+        vals = tbl.(value_field)(idx);
+        ns(g) = numel(vals);
+        if ns(g) > 0
+            means(g) = mean(vals);
+            if ns(g) > 1
+                sems(g) = std(vals) / sqrt(ns(g));
+            else
+                sems(g) = 0;
+            end
+        end
+    end
+
+function [means, sems, ns] = mean_sem_by_combo(tbl, combo_keys, value_field)
+    n_groups = numel(combo_keys);
+    means = nan(n_groups, 1);
+    sems = nan(n_groups, 1);
+    ns = zeros(n_groups, 1);
+    for g = 1:n_groups
+        parts = split(combo_keys{g}, '|');
+        idx = tbl.Hand == parts{1} & tbl.Target == parts{2} & tbl.Success == 1 & ~isnan(tbl.(value_field));
+        vals = tbl.(value_field)(idx);
+        ns(g) = numel(vals);
+        if ns(g) > 0
+            means(g) = mean(vals);
+            if ns(g) > 1
+                sems(g) = std(vals) / sqrt(ns(g));
+            else
+                sems(g) = 0;
+            end
+        end
+    end
+
+function trial_points = collect_trial_values_by_group(tbl, group_field, groups, value_field)
+    trial_points = cell(numel(groups), 1);
+    for g = 1:numel(groups)
+        idx = tbl.(group_field) == groups(g) & tbl.Success == 1 & ~isnan(tbl.(value_field));
+        trial_points{g} = tbl.(value_field)(idx);
+    end
+
+function trial_points = collect_trial_values_by_combo(tbl, combo_keys, value_field)
+    trial_points = cell(numel(combo_keys), 1);
+    for g = 1:numel(combo_keys)
+        parts = split(combo_keys{g}, '|');
+        idx = tbl.Hand == parts{1} & tbl.Target == parts{2} & tbl.Success == 1 & ~isnan(tbl.(value_field));
+        trial_points{g} = tbl.(value_field)(idx);
+    end
+
+function plot_hand_bar(means, sems, ns, labels, colors, title_str, y_label, trial_points)
+    if nargin < 8
+        trial_points = {};
+    end
+    x = 1:numel(means);
+    bh = bar(x, means, 0.65, 'FaceColor', 'flat');
+    for i = 1:numel(means)
+        if i <= size(colors, 1)
+            bh.CData(i, :) = colors(i, :);
+        end
+    end
+    hold on;
+    errorbar(x, means, sems, 'k.', 'LineWidth', 1.2, 'CapSize', 8);
+    overlay_trial_points_on_bars(x, trial_points, colors);
+    set(gca, 'XTick', x, 'XTickLabel', labels, 'FontWeight', 'bold');
+    xtickangle(20);
+    ylabel(y_label, 'FontWeight', 'bold');
+    title(title_str, 'FontSize', 11, 'FontWeight', 'bold');
+    grid on;
+    ymax = max(means + sems, [], 'omitnan');
+    if ~isempty(trial_points)
+        all_pts = vertcat(trial_points{:});
+        if ~isempty(all_pts)
+            ymax = max([ymax; all_pts], [], 'omitnan');
+        end
+    end
+    if ~isempty(ymax) && ~isnan(ymax)
+        ylim([0, ymax * 1.12]);
+    end
+    for i = 1:numel(means)
+        if ~isnan(means(i))
+            text(x(i), means(i) + sems(i), sprintf('n=%d', ns(i)), ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                'FontSize', 8, 'FontWeight', 'bold');
+        end
+    end
+
+function overlay_trial_points_on_bars(x, trial_points, colors)
+    % Round markers for each trial value, jittered within each bar group.
+    if isempty(trial_points)
+        return;
+    end
+    n_groups = numel(x);
+    for g = 1:min(n_groups, numel(trial_points))
+        vals = trial_points{g}(:);
+        vals = vals(~isnan(vals));
+        if isempty(vals)
+            continue;
+        end
+        n_pts = numel(vals);
+        if n_pts == 1
+            x_pts = x(g);
+        else
+            x_pts = x(g) + linspace(-0.18, 0.18, n_pts);
+        end
+        pt_color = colors(min(g, size(colors, 1)), :);
+        scatter(x_pts, vals, 20, 'o', ...
+            'MarkerFaceColor', pt_color, ...
+            'MarkerEdgeColor', [0.15, 0.15, 0.15], ...
+            'LineWidth', 0.6, ...
+            'MarkerFaceAlpha', 0.9);
+    end
+
+function plot_instructed_vs_choice_success(summary_tbl, color_left_hand, color_right_hand)
+    if isempty(summary_tbl)
+        text(0.5, 0.5, 'No summary data available', 'HorizontalAlignment', 'center');
+        axis off;
+        return;
+    end
+
+    instr_left = safe_pct(nansum(summary_tbl.InstrLeftSuccess), nansum(summary_tbl.InstrLeftTotal));
+    free_left = safe_pct(nansum(summary_tbl.FreeLeftSuccess), nansum(summary_tbl.FreeLeftTotal));
+    instr_right = safe_pct(nansum(summary_tbl.InstrRightSuccess), nansum(summary_tbl.InstrRightTotal));
+    free_right = safe_pct(nansum(summary_tbl.FreeRightSuccess), nansum(summary_tbl.FreeRightTotal));
+
+    x = [1 2];
+    % Grouped bar: rows = hand groups (Left/Right), columns = series (Instructed/Choice).
+    y = [instr_left, free_left; instr_right, free_right];
+    bh = bar(x, y, 'grouped', 'EdgeColor', 'k');
+    bh(1).FaceColor = 'flat';
+    bh(1).CData = [color_left_hand; color_right_hand];
+    bh(1).FaceAlpha = 0.45;
+    bh(2).FaceColor = 'flat';
+    bh(2).CData = [color_left_hand; color_right_hand];
+    bh(2).FaceAlpha = 0.95;
+
+    set(gca, 'XTick', x, 'XTickLabel', {'Left hand', 'Right hand'}, 'FontWeight', 'bold');
+    ylabel('Success rate (%)', 'FontWeight', 'bold');
+    title('Success Rate (Instructed vs Choice)', 'FontSize', 11, 'FontWeight', 'bold');
+    ylim([0 100]);
+    grid on;
+    legend(bh, {'Instructed', 'Choice'}, 'Location', 'best');
+
+    for s = 1:2
+        vals = y(:, s);
+        xpos = bh(s).XEndPoints;
+        for k = 1:2
+            if ~isnan(vals(k))
+                text(xpos(k), vals(k) + 2, sprintf('%.1f%%', vals(k)), ...
+                    'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                    'FontSize', 9, 'FontWeight', 'bold');
+            end
+        end
+    end
+
+function write_tables_to_excel(excel_path, block_tbls, block_trials_tbls, day_tbl, day_trials_tbl)
     if exist(excel_path, 'file')
         delete(excel_path);
     end
 
-    % Write general parameter tables
-    writetable(before_tbl, excel_path, 'Sheet', 'before_general');
-    writetable(after_tbl,  excel_path, 'Sheet', 'after_general');
-    
-    % Write trial-by-trial detailed tables with formatting
-    writetable(before_trials_tbl, excel_path, 'Sheet', 'before_all_data');
-    writetable(after_trials_tbl,  excel_path, 'Sheet', 'after_all_data');
-    
-    % Apply formatting: red for failed trials, green for successful trials
+    writetable(day_tbl, excel_path, 'Sheet', 'day_general');
+    writetable(day_trials_tbl, excel_path, 'Sheet', 'day_all_data');
+
+    n_blocks = numel(block_tbls);
+    for k = 1:n_blocks
+        sheet_general = sprintf('block%d_general', k);
+        sheet_data = sprintf('block%d_all_data', k);
+        writetable(block_tbls{k}, excel_path, 'Sheet', sheet_general);
+        writetable(block_trials_tbls{k}, excel_path, 'Sheet', sheet_data);
+    end
+
     try
-        % Open Excel file for formatting
         excel = actxserver('Excel.Application');
         excel.Visible = 0;
         workbook = excel.Workbooks.Open(excel_path);
-        
-        % Format before_all_data sheet
-        format_trial_sheet(workbook, 'before_all_data', before_trials_tbl);
-        
-        % Format after_all_data sheet
-        format_trial_sheet(workbook, 'after_all_data', after_trials_tbl);
-        
-        % Save and close
+
+        format_trial_sheet(workbook, 'day_all_data', day_trials_tbl);
+        for k = 1:n_blocks
+            format_trial_sheet(workbook, sprintf('block%d_all_data', k), block_trials_tbls{k});
+        end
+
         workbook.Save();
         workbook.Close();
         excel.Quit();
         delete(excel);
     catch ME
-        % If COM automation fails, just write tables without formatting
         warning('Could not apply Excel formatting: %s', ME.message);
     end
-
 function format_trial_sheet(workbook, sheet_name, tbl)
     % Format trial sheet: red for failed, green for successful
     try
@@ -1224,87 +1781,3 @@ function format_trial_sheet(workbook, sheet_name, tbl)
         warning('Could not format sheet %s: %s', sheet_name, ME.message);
     end
 
-function create_all_plots(free_LL, free_LR, free_RL, free_RR, instructed_LL, instructed_LR, instructed_RL, instructed_RR, ...
-                         free_success_count, free_percentage, instructed_success_count, instructed_percentage, ...
-                         total_success_count, filepath)
-    
-    fig = figure('Position', [50, 50, 1400, 1000], 'Name', 'Comprehensive Analysis Results');
-    
-    subplot(2, 2, 1);
-    create_combination_plot(free_LL, free_LR, free_RL, free_RR, 'Free Choice', free_success_count, free_percentage);
-    
-    subplot(2, 2, 2);
-    create_combination_plot(instructed_LL, instructed_LR, instructed_RL, instructed_RR, 'Instructed', instructed_success_count, instructed_percentage);
-    
-    subplot(2, 2, 3);
-    create_ipsi_contra_plot(free_LL, free_LR, free_RL, free_RR, instructed_LL, instructed_LR, instructed_RL, instructed_RR);
-    
-    [~, name, ext] = fileparts(filepath);
-    sgtitle(sprintf('Comprehensive Analysis - %s%s', name, ext), 'FontSize', 16, 'FontWeight', 'bold');
-
-function create_combination_plot(LL, LR, RL, RR, task_name, success_count, percentage)
-    % X-axis order: L-H/L-T, R-H/L-T, L-H/R-T, R-H/R-T
-    data = [LL, RL, LR, RR];
-    colors = [0.2, 0.6, 0.8; 0.4, 1.0, 0.8; 0.4, 0.8, 1.0; 0.2, 0.8, 0.6];
-    labels = {'L-H/L-T', 'R-H/L-T', 'L-H/R-T', 'R-H/R-T'};
-    
-    if sum(data) > 0
-        bar_handle = bar(data, 'FaceColor', 'flat');
-        bar_handle.CData = colors;
-        set(gca, 'XTickLabel', labels, 'FontWeight', 'bold');
-        ylabel('Number of trials', 'FontWeight', 'bold');
-        
-        title(sprintf('%s\n%d trials (%.1f%%)', task_name, success_count, percentage), ...
-              'FontSize', 12, 'FontWeight', 'bold');
-        grid on;
-        
-        total = sum(data);
-        for i = 1:4
-            if data(i) > 0
-                percent_val = (data(i) / total) * 100;
-                text(i, data(i), sprintf('%d\n(%.1f%%)', data(i), percent_val), ...
-                     'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
-                     'FontWeight', 'bold', 'FontSize', 10);
-            end
-        end
-    else
-        text(0.5, 0.5, 'No data available', ...
-             'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle', ...
-             'FontSize', 12, 'FontWeight', 'bold');
-    end
-
-function create_ipsi_contra_plot(free_LL, free_LR, free_RL, free_RR, instructed_LL, instructed_LR, instructed_RL, instructed_RR)
-    free_ipsi = free_LL + free_RR;
-    free_contra = free_LR + free_RL;
-    instructed_ipsi = instructed_LL + instructed_RR;
-    instructed_contra = instructed_LR + instructed_RL;
-    
-    data = [free_ipsi, free_contra; instructed_ipsi, instructed_contra];
-    labels = {'Free Choice', 'Instructed'};
-    type_labels = {'Ipsilateral', 'Contralateral'};
-    
-    colors = [1.0, 1.0, 0; 0.8, 0.4, 0.4];
-    
-    bar_handle = bar(data, 'grouped');
-    
-    for i = 1:length(bar_handle)
-        bar_handle(i).FaceColor = colors(i,:);
-    end
-    
-    set(gca, 'XTickLabel', labels, 'FontWeight', 'bold');
-    ylabel('Number of trials', 'FontWeight', 'bold');
-    title('Ipsilateral vs Contralateral Choices', 'FontSize', 12, 'FontWeight', 'bold');
-    legend(type_labels, 'Location', 'northeast');
-    grid on;
-    
-    for i = 1:2
-        total = sum(data(i,:));
-        for j = 1:2
-            if data(i,j) > 0
-                percent_val = (data(i,j) / total) * 100;
-                text(i + (j-1.5)*0.2, data(i,j), sprintf('%d\n(%.1f%%)', data(i,j), percent_val), ...
-                     'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
-                     'FontWeight', 'bold', 'FontSize', 9);
-            end
-        end
-    end
