@@ -1,5 +1,5 @@
-function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date)
-% ma1_reaches_analyze_mp2 - Daily reach analysis with per-block and day-summary plots.
+function details = ma1_analyze_reaches_session(input_path, animal_name, session_date)
+% ma1_analyze_reaches_session - Daily reach analysis with per-block and day-summary plots.
 %
 % Timing metrics (successful trials only), two independent epochs:
 %   FIXATION: RTFixToSensorRelease, MTSensorToFixHold
@@ -12,8 +12,8 @@ function details = ma1_reaches_analyze_mp2(input_path, animal_name, session_date
 % - Output path: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
 %
 % Usage:
-%   details = ma1_reaches_analyze_mp2('/path/to/one_run.mat', 'monkey_name');
-%   details = ma1_reaches_analyze_mp2('/path/to/day_folder', 'monkey_name');
+%   details = ma1_analyze_reaches_session('/path/to/one_run.mat', 'monkey_name');
+%   details = ma1_analyze_reaches_session('/path/to/day_folder', 'monkey_name');
 %   Session date is auto-detected from run filenames or folder name unless provided.
 
     % Keep MATLAB quiet
@@ -329,7 +329,7 @@ function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
 
 function out_dir = ensure_output_dir(animal_name, session_date)
     % Output root: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
-    data_root = fullfile('Y:', 'Data', 'Behavior_analysis/');
+    data_root = fullfile('Y:\Projects\dPul-MIP\Feno\Behavior_analysis');
     animal_dir = fullfile(data_root, animal_name);
     if ~exist(animal_dir, 'dir')
         mkdir(animal_dir);
