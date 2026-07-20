@@ -7,9 +7,8 @@ function details = ma1_analyze_reaches_session(input_path, animal_name, session_
 %
 % - Automatically detects all blocks (runs) from *.mat files in the day folder.
 % - Eye-calibration-only runs/trials (effector eye, no hand) are excluded.
-% - Generates one figure per block and one day-summary figure.
-% - Exports Excel with per-block and day-summary sheets.
-% - Output path: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
+% - Generates one combined figure per block and one day-summary figure.
+% - Output path: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}\{animal}_{yyyy-mm-dd}\
 %
 % Usage:
 %   details = ma1_analyze_reaches_session('/path/to/one_run.mat', 'monkey_name');
@@ -55,17 +54,13 @@ function details = ma1_analyze_reaches_session(input_path, animal_name, session_
         block_tbls{k} = analyze_runs_to_table(run_files(k), block_label);
         block_trials_tbls{k} = analyze_runs_to_trial_table(run_files(k), block_label);
         base_name = sprintf('%s_%s_block%d', animal_name, date_str, k);
-        block_plot_paths{k} = [ ...
-            make_block_analysis_figure(block_trials_tbls{k}, block_tbls{k}, out_dir, base_name); ...
-            make_free_choice_timing_figure(block_trials_tbls{k}, block_tbls{k}, out_dir, base_name)];
+        block_plot_paths{k} = make_session_figure(block_trials_tbls{k}, block_tbls{k}, out_dir, base_name);
     end
 
     day_tbl = analyze_runs_to_table(run_files, 'Day');
     day_trials_tbl = analyze_runs_to_trial_table(run_files, 'Day');
     day_base = sprintf('%s_%s_day', animal_name, date_str);
-    day_plot_paths = [ ...
-        make_block_analysis_figure(day_trials_tbl, day_tbl, out_dir, day_base); ...
-        make_free_choice_timing_figure(day_trials_tbl, day_tbl, out_dir, day_base)];
+    day_plot_paths = make_session_figure(day_trials_tbl, day_tbl, out_dir, day_base);
 
     all_plot_paths = day_plot_paths;
     for k = 1:n_blocks
@@ -328,7 +323,7 @@ function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
         });
 
 function out_dir = ensure_output_dir(animal_name, session_date)
-    % Output root: Y:\Data\{animal_name}\{animal_name}_{yyyy-mm-dd}\
+    % Output root: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}\{animal}_{yyyy-mm-dd}\
     data_root = fullfile('Y:\Projects\dPul-MIP\Feno\Behavior_analysis');
     animal_dir = fullfile(data_root, animal_name);
     if ~exist(animal_dir, 'dir')
@@ -338,6 +333,12 @@ function out_dir = ensure_output_dir(animal_name, session_date)
     out_dir = fullfile(animal_dir, session_folder);
     if ~exist(out_dir, 'dir')
         mkdir(out_dir);
+    end
+    % exportgraphics/print require a resolvable absolute path on all platforms
+    try
+        out_dir = char(java.io.File(out_dir).getCanonicalPath());
+    catch
+        % keep original out_dir if Java path resolution is unavailable
     end
 
 function run_files = normalize_run_files(run_files)
@@ -735,6 +736,16 @@ function run_tbl = analyze_single_run(filepath, run_index, condition_label)
             'abort_use_incorrect_hand','abort_hnd_fix_acq_state','abort_hnd_del_per_state', ...
             'abort_hnd_tar_acq_state','abort_hnd_fix_hold_state' ...
         });
+
+function title_str = format_figure_title(title_str)
+    % File-style names use underscores; show them as spaces in figure titles.
+    title_str = char(strrep(string(title_str), "_", " "));
+
+function apply_plain_text_figure(fig)
+    % Avoid TeX subscripts from underscores and broken % labels in legends.
+    set(fig, 'DefaultAxesTickLabelInterpreter', 'none');
+    set(fig, 'DefaultLegendInterpreter', 'none');
+    set(fig, 'DefaultTextInterpreter', 'none');
 
 function pct = safe_pct(x, n)
     if n > 0
@@ -1291,31 +1302,95 @@ function t_target = get_kinematic_target_arrival_time(trial, t_detach)
         end
     end
 
-function plot_paths = make_block_analysis_figure(trials_tbl, summary_tbl, out_dir, base_name)
-    % Combined figure: free/instructed combinations and ipsi/contra choice counts.
+function plot_paths = make_session_figure(trials_tbl, summary_tbl, out_dir, base_name)
+    % One PNG per block/day: reach counts, free-choice timing, delay-success curve.
     plot_paths = {};
-    if isempty(summary_tbl)
+    if isempty(summary_tbl) || isempty(trials_tbl)
         return;
     end
 
     [combo_labels, combo_keys, combo_colors] = get_hand_target_plot_config();
     counts = aggregate_combination_counts(summary_tbl);
+    color_left_hand = combo_colors(1, :);
+    color_right_hand = combo_colors(4, :);
 
-    fig = figure('Visible', 'off', 'Position', [50 50 1600 550]);
+    free_tbl = trials_tbl(trials_tbl.TaskType == "Free", :);
+    success_free = free_tbl(free_tbl.Success == 1, :);
+    success_free = subset_trials_with_complete_timing(success_free);
 
-    subplot(1, 3, 1);
+    fig = figure('Visible', 'off', 'Position', [50 50 1600 1900]);
+    apply_plain_text_figure(fig);
+
+    subplot(5, 3, 1);
     plot_combination_bars(counts.free_LL, counts.free_LR, counts.free_RL, counts.free_RR, ...
         combo_labels, combo_colors, 'Free Choice');
 
-    subplot(1, 3, 2);
+    subplot(5, 3, 2);
     plot_combination_bars(counts.instr_LL, counts.instr_LR, counts.instr_RL, counts.instr_RR, ...
         combo_labels, combo_colors, 'Instructed');
 
-    subplot(1, 3, 3);
+    subplot(5, 3, 3);
     plot_ipsi_contra_bars(counts.free_LL, counts.free_LR, counts.free_RL, counts.free_RR, ...
         counts.instr_LL, counts.instr_LR, counts.instr_RL, counts.instr_RR);
 
-    sgtitle(sprintf('Reach Analysis: %s', base_name), 'FontSize', 14, 'FontWeight', 'bold');
+    if ~isempty(success_free)
+        groups_hand = ["Left", "Right"];
+
+        subplot(5, 3, 4);
+        [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'RTFixToSensorRelease', groups_hand);
+        trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'RTFixToSensorRelease');
+        plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
+            [color_left_hand; color_right_hand], ...
+            'RT: Fixation → Sensor Release (free choice)', 'Time (s)', trial_pts);
+
+        subplot(5, 3, 5);
+        [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'MTSensorToFixHold', groups_hand);
+        trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'MTSensorToFixHold');
+        plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
+            [color_left_hand; color_right_hand], ...
+            'MT: Sensor Release → Fix Hold (free choice)', 'Time (s)', trial_pts);
+
+        subplot(5, 3, 6);
+        [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'RTGoToMovement');
+        trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'RTGoToMovement');
+        plot_hand_bar(means, sems, ns, combo_labels, combo_colors, ...
+            'RT to Target (Go → Fix Exit) (free choice)', 'Time (s)', trial_pts);
+
+        subplot(5, 3, 7);
+        [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'MTMovementToTarget');
+        trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'MTMovementToTarget');
+        plot_hand_bar(means, sems, ns, combo_labels, combo_colors, ...
+            'MT: Fix Exit → Target (free choice)', 'Time (s)', trial_pts);
+
+        subplot(5, 3, [8 9]);
+        plot_instructed_vs_choice_success(summary_tbl, color_left_hand, color_right_hand);
+
+        subplot(5, 3, [10 11 12]);
+        plot_go_reaction_timeline(success_free, combo_keys, combo_labels, combo_colors);
+        title('RT to Target Over Trials (Go → Fix Exit) (free choice)', ...
+            'FontSize', 11, 'FontWeight', 'bold', 'Interpreter', 'none');
+    else
+        for k = 4:7
+            subplot(5, 3, k);
+            text(0.5, 0.5, 'No successful free-choice timing data', ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+            axis off;
+        end
+        subplot(5, 3, [8 9]);
+        text(0.5, 0.5, 'No successful free-choice timing data', ...
+            'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+        axis off;
+        subplot(5, 3, [10 11 12]);
+        text(0.5, 0.5, 'No successful free-choice timing data', ...
+            'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+        axis off;
+    end
+
+    subplot(5, 3, [13 14 15]);
+    plot_delay_vs_success_by_duration(trials_tbl);
+
+    sgtitle(format_figure_title(sprintf('Session Analysis: %s', base_name)), ...
+        'FontSize', 14, 'FontWeight', 'bold', 'Interpreter', 'none');
 
     plot_path = fullfile(out_dir, [base_name '.png']);
     try
@@ -1447,7 +1522,6 @@ function plot_go_reaction_timeline(trials_tbl, combo_keys, combo_labels, combo_c
 
     xlabel('Trial', 'FontWeight', 'bold');
     ylabel('RT to target (s)', 'FontWeight', 'bold');
-    title('RT to Target Over Trials (Go \rightarrow Fix Exit)', 'FontSize', 11, 'FontWeight', 'bold');
     xlim([0.5, n_trials + 0.5]);
     grid on;
     if ~isempty(legend_entries)
@@ -1457,71 +1531,53 @@ function plot_go_reaction_timeline(trials_tbl, combo_keys, combo_labels, combo_c
             'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
     end
 
-function plot_paths = make_free_choice_timing_figure(trials_tbl, summary_tbl, out_dir, base_name)
-    % Timing figure: fixation-epoch latencies, Go reaction time, movement time, success rates.
-    plot_paths = {};
+function plot_delay_vs_success_by_duration(trials_tbl)
+    % Delay duration (Y) vs success/fail percentage (X), one point per delay value.
     if isempty(trials_tbl) || height(trials_tbl) == 0
+        text(0.5, 0.5, 'No trial data available', 'HorizontalAlignment', 'center');
+        axis off;
         return;
     end
 
-    [combo_labels, combo_keys, combo_colors] = get_hand_target_plot_config();
-    color_left_hand = combo_colors(1, :);
-    color_right_hand = combo_colors(4, :);
-
-    free_tbl = trials_tbl(trials_tbl.TaskType == "Free", :);
-    if isempty(free_tbl)
+    valid_mask = ~isnan(trials_tbl.DelayDuration);
+    tbl = trials_tbl(valid_mask, :);
+    if isempty(tbl)
+        text(0.5, 0.5, 'No delay duration data', 'HorizontalAlignment', 'center');
+        axis off;
         return;
     end
 
-    success_free = free_tbl(free_tbl.Success == 1, :);
-    % Use the same successful free-choice cohort on all RT/MT panels.
-    success_free = subset_trials_with_complete_timing(success_free);
-    if isempty(success_free)
-        return;
+    delays = round(tbl.DelayDuration, 3);
+    uniq_delays = unique(delays);
+    n_bins = numel(uniq_delays);
+    success_pct = nan(n_bins, 1);
+    fail_pct = nan(n_bins, 1);
+
+    for k = 1:n_bins
+        idx = delays == uniq_delays(k);
+        n_total = sum(idx);
+        n_success = sum(tbl.Success(idx) == 1);
+        success_pct(k) = n_success / n_total * 100;
+        fail_pct(k) = (n_total - n_success) / n_total * 100;
     end
 
-    fig = figure('Visible', 'off', 'Position', [50 50 1600 1000]);
+    [uniq_delays, sort_idx] = sort(uniq_delays);
+    success_pct = success_pct(sort_idx);
+    fail_pct = fail_pct(sort_idx);
 
-    subplot(2, 3, 1);
-    groups_hand = ["Left", "Right"];
-    [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'RTFixToSensorRelease', groups_hand);
-    trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'RTFixToSensorRelease');
-    plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
-        [color_left_hand; color_right_hand], 'RT: Fixation \rightarrow Sensor Release', 'Time (s)', trial_pts);
-
-    subplot(2, 3, 2);
-    [means, sems, ns] = mean_sem_by_group(success_free, 'Hand', 'MTSensorToFixHold', groups_hand);
-    trial_pts = collect_trial_values_by_group(success_free, 'Hand', groups_hand, 'MTSensorToFixHold');
-    plot_hand_bar(means, sems, ns, {'Left hand', 'Right hand'}, ...
-        [color_left_hand; color_right_hand], 'MT: Sensor Release \rightarrow Fix Hold', 'Time (s)', trial_pts);
-
-    subplot(2, 3, 3);
-    [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'RTGoToMovement');
-    trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'RTGoToMovement');
-    plot_hand_bar(means, sems, ns, combo_labels, combo_colors, 'RT to Target (Go \rightarrow Fix Exit)', 'Time (s)', trial_pts);
-
-    subplot(2, 3, 4);
-    [means, sems, ns] = mean_sem_by_combo(success_free, combo_keys, 'MTMovementToTarget');
-    trial_pts = collect_trial_values_by_combo(success_free, combo_keys, 'MTMovementToTarget');
-    plot_hand_bar(means, sems, ns, combo_labels, combo_colors, 'MT: Fix Exit \rightarrow Target', 'Time (s)', trial_pts);
-
-    subplot(2, 3, 5);
-    plot_go_reaction_timeline(success_free, combo_keys, combo_labels, combo_colors);
-
-    subplot(2, 3, 6);
-    plot_instructed_vs_choice_success(summary_tbl, color_left_hand, color_right_hand);
-
-    sgtitle(sprintf('Timing Analysis (Free Choice): %s', base_name), ...
-        'FontSize', 14, 'FontWeight', 'bold');
-
-    plot_path = fullfile(out_dir, [base_name '_free_choice_timing.png']);
-    try
-        exportgraphics(fig, plot_path, 'Resolution', 200);
-    catch
-        print(fig, plot_path, '-dpng', '-r200');
-    end
-    close(fig);
-    plot_paths{end+1, 1} = plot_path;
+    hold on;
+    plot(success_pct, uniq_delays, '-o', 'Color', [0.2 0.75 0.2], ...
+        'LineWidth', 2, 'MarkerFaceColor', [0.2 0.75 0.2], 'MarkerSize', 6, ...
+        'DisplayName', 'Successful trials');
+    plot(fail_pct, uniq_delays, '-o', 'Color', [0.55 0.55 0.55], ...
+        'LineWidth', 2, 'MarkerFaceColor', [0.55 0.55 0.55], 'MarkerSize', 6, ...
+        'DisplayName', 'Failed trials');
+    grid on;
+    xlabel('Success trials (%)', 'FontWeight', 'bold');
+    ylabel('Delay duration (s)', 'FontWeight', 'bold');
+    title('Delay Duration vs Success Rate', 'FontSize', 11, 'FontWeight', 'bold');
+    xlim([0 100]);
+    legend('Location', 'best');
 
 function timing_fields = get_timing_metric_fields()
     timing_fields = {'RTFixToSensorRelease', 'MTSensorToFixHold', ...
@@ -1612,7 +1668,7 @@ function plot_hand_bar(means, sems, ns, labels, colors, title_str, y_label, tria
     set(gca, 'XTick', x, 'XTickLabel', labels, 'FontWeight', 'bold');
     xtickangle(20);
     ylabel(y_label, 'FontWeight', 'bold');
-    title(title_str, 'FontSize', 11, 'FontWeight', 'bold');
+    title(title_str, 'FontSize', 11, 'FontWeight', 'bold', 'Interpreter', 'none');
     grid on;
     ymax = max(means + sems, [], 'omitnan');
     if ~isempty(trial_points)
