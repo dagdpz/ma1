@@ -11,7 +11,7 @@ function timing = ma1_extract_timing_params(trial)
 %   timing - Structure containing all timing parameters
 %
 % Example:
-%   data = load('Fen2026-01-16_01.mat');
+%   data = load('Y:\Data\Feno\20260715\Fen2026-07-15_01.mat');
 %   timing = ma1_extract_timing_params(data.trial(2));
 
 timing = struct();

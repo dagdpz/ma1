@@ -1,0 +1,21 @@
+---
+description: MATLAB help and README must include copy-pasteable real path examples
+globs: "**/*.{m,md}"
+alwaysApply: false
+---
+
+# Real example calls in docs
+
+When writing or updating function help headers, README usage blocks, or API docs:
+
+- Always include at least one **Example** that is a full, copy-pasteable call
+- Use real lab paths (e.g. `Y:\Data\Feno\20260715`, `Y:\Projects\dPul-MIP\Feno\Behavior_analysis\`), never `/path/to/...` or bare basenames alone
+- Prefer the canonical session call:
+
+```matlab
+out = ma1_analyze_reaches_session( ...
+    'Y:\Data\Feno\20260715', ...
+    'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\');
+```
+
+- Abstract Usage signatures are fine *in addition* to real Examples; never replace Examples with only signatures
