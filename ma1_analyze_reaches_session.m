@@ -8,7 +8,7 @@ function details = ma1_analyze_reaches_session(input_path, animal_name, session_
 % - Automatically detects all blocks (runs) from *.mat files in the day folder.
 % - Eye-calibration-only runs/trials (effector eye, no hand) are excluded.
 % - Generates one combined figure per block and one day-summary figure.
-% - Output path: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}\{animal}_{yyyy-mm-dd}\
+% - Output path: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}_{yyyy-mm-dd}\
 %
 % Usage:
 %   details = ma1_analyze_reaches_session('/path/to/one_run.mat', 'monkey_name');
@@ -323,14 +323,13 @@ function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
         });
 
 function out_dir = ensure_output_dir(animal_name, session_date)
-    % Output root: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}\{animal}_{yyyy-mm-dd}\
+    % Output: Y:\Projects\dPul-MIP\Feno\Behavior_analysis\{animal}_{yyyy-mm-dd}\
     data_root = fullfile('Y:\Projects\dPul-MIP\Feno\Behavior_analysis');
-    animal_dir = fullfile(data_root, animal_name);
-    if ~exist(animal_dir, 'dir')
-        mkdir(animal_dir);
+    if ~exist(data_root, 'dir')
+        mkdir(data_root);
     end
     session_folder = sprintf('%s_%s', animal_name, datestr(session_date, 'yyyy-mm-dd'));
-    out_dir = fullfile(animal_dir, session_folder);
+    out_dir = fullfile(data_root, session_folder);
     if ~exist(out_dir, 'dir')
         mkdir(out_dir);
     end
@@ -1532,7 +1531,7 @@ function plot_go_reaction_timeline(trials_tbl, combo_keys, combo_labels, combo_c
     end
 
 function plot_delay_vs_success_by_duration(trials_tbl)
-    % Delay duration (Y) vs success/fail percentage (X), one point per delay value.
+    % Delay duration (X) vs success/fail percentage (Y), one point per delay value.
     if isempty(trials_tbl) || height(trials_tbl) == 0
         text(0.5, 0.5, 'No trial data available', 'HorizontalAlignment', 'center');
         axis off;
@@ -1566,17 +1565,17 @@ function plot_delay_vs_success_by_duration(trials_tbl)
     fail_pct = fail_pct(sort_idx);
 
     hold on;
-    plot(success_pct, uniq_delays, '-o', 'Color', [0.2 0.75 0.2], ...
+    plot(uniq_delays, success_pct, '-o', 'Color', [0.2 0.75 0.2], ...
         'LineWidth', 2, 'MarkerFaceColor', [0.2 0.75 0.2], 'MarkerSize', 6, ...
         'DisplayName', 'Successful trials');
-    plot(fail_pct, uniq_delays, '-o', 'Color', [0.55 0.55 0.55], ...
+    plot(uniq_delays, fail_pct, '-o', 'Color', [0.55 0.55 0.55], ...
         'LineWidth', 2, 'MarkerFaceColor', [0.55 0.55 0.55], 'MarkerSize', 6, ...
         'DisplayName', 'Failed trials');
     grid on;
-    xlabel('Success trials (%)', 'FontWeight', 'bold');
-    ylabel('Delay duration (s)', 'FontWeight', 'bold');
-    title('Delay Duration vs Success Rate', 'FontSize', 11, 'FontWeight', 'bold');
-    xlim([0 100]);
+    xlabel('Delay duration (s)', 'FontWeight', 'bold');
+    ylabel('Success trials (%)', 'FontWeight', 'bold');
+    title('Success Rate vs Delay Duration', 'FontSize', 11, 'FontWeight', 'bold');
+    ylim([0 100]);
     legend('Location', 'best');
 
 function timing_fields = get_timing_metric_fields()
