@@ -1,6 +1,6 @@
-function [out] = ma1_analyze_reaches(filepath)
+function [out] = ma1_analyze_reaches_run(filepath)
 % Analyze reach statistics using vectorized operations (no loops)
-% Usage: out = ma1_monkey_analyze_reaches('E:\Dropbox\DAG\Maria\20251007\Fen2025-10-07_01.mat')
+% Usage: out = ma1_analyze_reaches_run('E:\Dropbox\DAG\Maria\20251007\Fen2025-10-07_01.mat')
 % Created by Cursor AI, without loops
 
 if nargin < 1
