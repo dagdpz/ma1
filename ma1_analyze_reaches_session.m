@@ -1,4 +1,4 @@
-function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, write_excel)
+function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, write_excel, skip_runs)
 % ma1_analyze_reaches_session - Daily hand-reach session analysis (tables, plots, Excel).
 %
 % Pipeline: setup -> resolve out_dir -> discover runs -> one-load analyze -> day tables
@@ -13,37 +13,48 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
 %
 % Usage:
 %   out = ma1_analyze_reaches_session(input_path, output_base);
-%   out = ma1_analyze_reaches_session(input_path, output_base, skip_runs);
-%   out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, write_excel);
+%   out = ma1_analyze_reaches_session(input_path, output_base, keep_runs);
+%   out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, write_excel);
 %   out = ma1_analyze_reaches_session(input_path, output_base, false);  % no Excel
 %
 % Example:
 %   out = ma1_analyze_reaches_session( ...
 %       'Y:\Data\Feno\20260715', ...
 %       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', false);
-%   % PDFs in Y:\Projects\dPul-MIP\Feno\Behavior_analysis\20260715
-%   % e.g. Fen2026-07-15_02.pdf , Feno_2026-07-15_session.pdf
+%   out = ma1_analyze_reaches_session( ...
+%       'Y:\Data\Feno\20260818', ...
+%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', [2 3], false);
+%   % keep Fen*_02.mat + *_03.mat (filename _xx, not discovery index)
+%   % combined PDFs: Fen_2026-08-18_02-03.pdf , Fen_2026-08-18_02-03_errors.pdf
 %
 % Inputs:
 %   input_path   - day folder OR a single .mat (only that file if a file)
 %   output_base  - analysis root; session leaf from input_path -> out_dir
-%   skip_runs    - optional basenames and/or 1-based indices (or logical write_excel)
+%   keep_runs    - optional run _xx selector: [2 3], {'02','03'}, '02-03',
+%                  {'_02','Fen2026-08-18_05'}; []/{} = all .mat in folder
+%                  (or logical write_excel if 3rd arg is scalar logical)
 %   write_excel  - optional logical, default true
+%   skip_runs    - optional extra drop list (basenames and/or 1-based discovery indices)
 %
 % Output (struct out): animal_name, session_date, session_folder, output_base, out_dir,
-%   run_files, n_runs, skipped_calibration_runs, skipped_user_runs, write_excel,
-%   excel_fullpath, plot_files, run_tables, day_table, run_trials_tables, day_trials_table
+%   run_files, n_runs, run_tag, keep_runs, skipped_calibration_runs, skipped_user_runs, write_excel,
+%   excel_fullpath, plot_files, error_plot_files, run_tables, day_table, run_trials_tables, day_trials_table
 %
 % Figures (tiledlayout 3x4): row1 instr success / free-choice share / uncrossed;
 %   row2 four RT/MT panels; row3 RT-vs-trial + wait-from-cue hist (tiles 11-12 spare).
+% Extra errors PDF (2x5): abort-state % + abort times for this task's mid-sequence only
+%   (type 2 = FIX/TAR, no CUE/DEL); lower = endpoints for states the task actually has.
+%   lower = endpoints vs windows (eye orange, hand windows dark yellow, LH/RH traces blue/green):
+%   success FIX_HOL/TAR_HOL means; abort pre→post for FIX / CUE+DEL / TAR.
 % DelayForHist is ALWAYS from CUE_ON onset (success = cue+delay; abort = cue→abort).
 % Panel 2 = instructed hand×space only (Free success-by-chosen-space omitted).
 
     prevWarn = warning('query', 'MATLAB:xlswrite:AddSheet');
     warning('off', 'MATLAB:xlswrite:AddSheet');
-    c = onCleanup(@() warning(prevWarn)); %#ok<NASGU>
+    c = onCleanup(@() warning(prevWarn));
 
-    run(fullfile(fileparts(mfilename('fullpath')), 'ma1_task_state_dictionary.m'));
+    dict = get_task_state_dict();
+    STATE = dict.STATE;
 
     if nargin < 1 || isempty(input_path)
         error('Input path is required (file or folder).');
@@ -51,14 +62,17 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
     if nargin < 2 || isempty(output_base)
         error('Output base path is required.');
     end
-    if nargin < 3 || isempty(skip_runs)
-        skip_runs = {};
+    if nargin < 3
+        keep_runs = [];
     end
     if nargin < 4 || isempty(write_excel)
         write_excel = true;
     end
-    if nargin == 3 && islogical(skip_runs) && isscalar(skip_runs)
-        write_excel = skip_runs;
+    if nargin == 3 && islogical(keep_runs) && isscalar(keep_runs)
+        write_excel = keep_runs;
+        keep_runs = [];
+    end
+    if nargin < 5 || isempty(skip_runs)
         skip_runs = {};
     end
     if ~islogical(write_excel) || ~isscalar(write_excel)
@@ -77,16 +91,20 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
         fprintf('  [%d] %s\n', i, all_run_files{i});
     end
 
-    [run_candidates, skipped_user_runs] = apply_skip_runs(all_run_files, skip_runs);
+    [run_candidates, keep_ids] = apply_keep_runs(all_run_files, keep_runs);
+    if ~isempty(keep_ids)
+        fprintf('keep_runs _xx filter: %s\n', format_run_id_list(keep_ids));
+    end
+    [run_candidates, skipped_user_runs] = apply_skip_runs(run_candidates, skip_runs);
     if ~isempty(skipped_user_runs)
         fprintf('Skipped by user skip_runs (%d):\n', numel(skipped_user_runs));
         for i = 1:numel(skipped_user_runs)
             fprintf('  - %s\n', skipped_user_runs{i});
         end
     end
-    fprintf('Candidates after skip_runs: %d\n', numel(run_candidates));
+    fprintf('Candidates after keep/skip: %d\n', numel(run_candidates));
     if isempty(run_candidates)
-        error('No .mat files found after skip_runs.');
+        error('No .mat files found after keep_runs/skip_runs.');
     end
 
     % One load per candidate: calibration-only runs skipped inside process_single_run.
@@ -137,7 +155,8 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
     date_str = char(session_date, 'yyyy-MM-dd');
 
     n_runs = numel(run_files);
-    excel_fullpath = fullfile(out_dir, sprintf('%s_%s.xlsx', animal_name, date_str));
+    run_tag = format_run_suffix_tag(run_files);
+    excel_fullpath = fullfile(out_dir, sprintf('%s_%s_%s.xlsx', animal_name, date_str, run_tag));
 
     day_tbl = vertcat(run_tbls{:});
     if ~isempty(day_tbl)
@@ -155,14 +174,23 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
     end
 
     plot_files = cell(n_runs + 1, 1);
+    error_plot_files = cell(n_runs + 1, 1);
     for k = 1:n_runs
         [~, run_base, ~] = fileparts(run_files{k});
         plot_files{k} = make_run_figure(run_trials_tbls{k}, out_dir, run_base);
+        error_plot_files{k} = make_error_figure( ...
+            run_trials_tbls{k}, {}, false, out_dir, [run_base '_errors'], ...
+            sprintf('Errors: %s', run_base));
     end
-    session_title = sprintf('%s %s (%d runs)', animal_name, date_str, n_runs);
+    session_title = sprintf('%s %s (runs %s)', animal_name, date_str, run_tag);
+    session_base = sprintf('%s_%s_%s', animal_name, date_str, run_tag);
+    error_plot_files{end} = make_error_figure( ...
+        day_trials_tbl, run_trials_tbls, true, out_dir, ...
+        [session_base '_errors'], ...
+        sprintf('%s errors', session_title));
     plot_files{end} = make_session_figure( ...
         day_trials_tbl, run_trials_tbls, out_dir, ...
-        sprintf('%s_%s_session', animal_name, date_str), session_title);
+        session_base, session_title);
 
     if write_excel
         write_tables_to_excel(excel_fullpath, run_tbls, run_trials_tbls, ...
@@ -178,12 +206,15 @@ function out = ma1_analyze_reaches_session(input_path, output_base, skip_runs, w
     out.output_base = char(output_base);
     out.run_files = run_files;
     out.n_runs = n_runs;
+    out.run_tag = run_tag;
+    out.keep_runs = keep_runs;
     out.skipped_calibration_runs = skipped_calibration_runs;
     out.skipped_user_runs = skipped_user_runs;
     out.write_excel = write_excel;
     out.excel_fullpath = excel_fullpath;
     out.out_dir = out_dir;
     out.plot_files = plot_files;
+    out.error_plot_files = error_plot_files;
     out.run_tables = run_tbls;
     out.day_table = day_tbl;
     out.run_trials_tables = run_trials_tbls;
@@ -237,6 +268,7 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
     trial_col = int32((1:n_trials)');
     file_col = repmat(string(filepath), n_trials, 1);
     task_type_col = repmat("", n_trials, 1);
+    mp_type_col = NaN(n_trials, 1);
     delay_col = NaN(n_trials, 1);
     target_acq_time_col = NaN(n_trials, 1);
     rt_fix_sensor_col = NaN(n_trials, 1);
@@ -252,6 +284,24 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
     abort_after_cue_col = zeros(n_trials, 1);
     fix_hand_known_col = zeros(n_trials, 1);
     cue_space_assignable_col = zeros(n_trials, 1);
+    aborted_state_col = NaN(n_trials, 1);
+    aborted_state_dur_col = NaN(n_trials, 1);
+    eye_fix_mx = NaN(n_trials, 1); eye_fix_my = NaN(n_trials, 1);
+    hnd_fix_mx = NaN(n_trials, 1); hnd_fix_my = NaN(n_trials, 1);
+    eye_tar_mx = NaN(n_trials, 1); eye_tar_my = NaN(n_trials, 1);
+    hnd_tar_mx = NaN(n_trials, 1); hnd_tar_my = NaN(n_trials, 1);
+    eye_pre_x = NaN(n_trials, 1); eye_pre_y = NaN(n_trials, 1);
+    hnd_pre_x = NaN(n_trials, 1); hnd_pre_y = NaN(n_trials, 1);
+    eye_post_x = NaN(n_trials, 1); eye_post_y = NaN(n_trials, 1);
+    hnd_post_x = NaN(n_trials, 1); hnd_post_y = NaN(n_trials, 1);
+    win_eye_fix_x = NaN(n_trials, 1); win_eye_fix_y = NaN(n_trials, 1); win_eye_fix_r = NaN(n_trials, 1);
+    win_hnd_fix_x = NaN(n_trials, 1); win_hnd_fix_y = NaN(n_trials, 1); win_hnd_fix_r = NaN(n_trials, 1);
+    win_eye_tar_x = NaN(n_trials, 1); win_eye_tar_y = NaN(n_trials, 1); win_eye_tar_r = NaN(n_trials, 1);
+    win_hnd_tar_x = NaN(n_trials, 1); win_hnd_tar_y = NaN(n_trials, 1); win_hnd_tar_r = NaN(n_trials, 1);
+    win_eye_tar2_x = NaN(n_trials, 1); win_eye_tar2_y = NaN(n_trials, 1); win_eye_tar2_r = NaN(n_trials, 1);
+    win_hnd_tar2_x = NaN(n_trials, 1); win_hnd_tar2_y = NaN(n_trials, 1); win_hnd_tar2_r = NaN(n_trials, 1);
+    win_hnd_cue_x = NaN(n_trials, 1); win_hnd_cue_y = NaN(n_trials, 1); win_hnd_cue_r = NaN(n_trials, 1);
+    win_hnd_cue2_x = NaN(n_trials, 1); win_hnd_cue2_y = NaN(n_trials, 1); win_hnd_cue2_r = NaN(n_trials, 1);
 
     S = init_run_summary_counters(n_trials);
 
@@ -264,9 +314,10 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
         elseif choice == 0
             task_type_col(i) = "Instructed";
         end
+        mp_type_col(i) = get_scalar_num_field(trial, 'type');
 
-        delay_col(i) = get_delay_period_duration(trial, STATE);
-        target_acq_time_col(i) = get_target_acq_time(trial, STATE);
+        t_al = get_aligned_sample_time(trial, STATE);
+        [delay_col(i), target_acq_time_col(i)] = get_delay_and_target_acq(trial, STATE);
 
         success_col(i) = get_scalar_num_field(trial, 'success');
         if isnan(success_col(i))
@@ -275,7 +326,7 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
         if success_col(i) == 1
             S.successful_trials = S.successful_trials + 1;
             [rt_fix_sensor_col(i), mt_sensor_fix_col(i), rt_go_move_col(i), mt_move_target_col(i)] = ...
-                get_trial_timing_metrics(trial, STATE);
+                get_trial_timing_metrics(trial, STATE, t_al);
         else
             S.failed_trials = S.failed_trials + 1;
         end
@@ -297,17 +348,21 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
         end
 
         fix_hand_known_col(i) = double(trial_reached_fixation(trial, STATE) && ismember(rh, [1, 2]));
+        % Target L/R already implies cue/target geometry; state scan was redundant.
         cue_space_assignable_col(i) = double( ...
-            trial_cue_or_target_shown(trial, STATE) && ismember(choice, [0, 1]) && ...
-            ismember(rh, [1, 2]) && ismember(target_pos, [1, 2]));
+            ismember(choice, [0, 1]) && ismember(rh, [1, 2]) && ismember(target_pos, [1, 2]));
 
+        aborted_state = NaN;
+        abr_dur = NaN;
         if success_col(i) == 0
             reason = get_abort_reason(trial);
             if strlength(string(reason)) > 0
                 abort_reason_col(i) = string(lower(reason));
             end
+            aborted_state = get_trial_aborted_state(trial, STATE);
+            abr_dur = get_aborted_state_duration(trial);
             [abort_after_cue_col(i), delay_for_hist_col(i), time_until_abort_col(i)] = ...
-                compute_delay_hist_fields(trial, success_col(i), STATE, delay_col(i), reason);
+                compute_delay_hist_fields(trial, success_col(i), STATE, delay_col(i), reason, aborted_state);
             S = bump_abort_reason_counter(S, reason);
         else
             abort_reason_col(i) = "";
@@ -329,6 +384,26 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
             end
             S = bump_hand_target_combo(S, choice, rh, target_pos);
         end
+
+        sp = get_trial_spatial_metrics(trial, STATE, t_al, aborted_state, abr_dur);
+        aborted_state_col(i) = sp.AbortedState;
+        aborted_state_dur_col(i) = sp.AbortedStateDuration;
+        eye_fix_mx(i) = sp.EyeFixMeanX; eye_fix_my(i) = sp.EyeFixMeanY;
+        hnd_fix_mx(i) = sp.HndFixMeanX; hnd_fix_my(i) = sp.HndFixMeanY;
+        eye_tar_mx(i) = sp.EyeTarMeanX; eye_tar_my(i) = sp.EyeTarMeanY;
+        hnd_tar_mx(i) = sp.HndTarMeanX; hnd_tar_my(i) = sp.HndTarMeanY;
+        eye_pre_x(i) = sp.EyeAbortPreX; eye_pre_y(i) = sp.EyeAbortPreY;
+        hnd_pre_x(i) = sp.HndAbortPreX; hnd_pre_y(i) = sp.HndAbortPreY;
+        eye_post_x(i) = sp.EyeAbortPostX; eye_post_y(i) = sp.EyeAbortPostY;
+        hnd_post_x(i) = sp.HndAbortPostX; hnd_post_y(i) = sp.HndAbortPostY;
+        win_eye_fix_x(i) = sp.WinEyeFixX; win_eye_fix_y(i) = sp.WinEyeFixY; win_eye_fix_r(i) = sp.WinEyeFixR;
+        win_hnd_fix_x(i) = sp.WinHndFixX; win_hnd_fix_y(i) = sp.WinHndFixY; win_hnd_fix_r(i) = sp.WinHndFixR;
+        win_eye_tar_x(i) = sp.WinEyeTarX; win_eye_tar_y(i) = sp.WinEyeTarY; win_eye_tar_r(i) = sp.WinEyeTarR;
+        win_hnd_tar_x(i) = sp.WinHndTarX; win_hnd_tar_y(i) = sp.WinHndTarY; win_hnd_tar_r(i) = sp.WinHndTarR;
+        win_eye_tar2_x(i) = sp.WinEyeTar2X; win_eye_tar2_y(i) = sp.WinEyeTar2Y; win_eye_tar2_r(i) = sp.WinEyeTar2R;
+        win_hnd_tar2_x(i) = sp.WinHndTar2X; win_hnd_tar2_y(i) = sp.WinHndTar2Y; win_hnd_tar2_r(i) = sp.WinHndTar2R;
+        win_hnd_cue_x(i) = sp.WinHndCueX; win_hnd_cue_y(i) = sp.WinHndCueY; win_hnd_cue_r(i) = sp.WinHndCueR;
+        win_hnd_cue2_x(i) = sp.WinHndCue2X; win_hnd_cue2_y(i) = sp.WinHndCue2Y; win_hnd_cue2_r(i) = sp.WinHndCue2R;
     end
 
     trials_tbl = table( ...
@@ -345,6 +420,26 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
             'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort', ...
             'DelayForHist', 'AbortAfterCue', 'FixHandKnown', 'CueSpaceAssignable', ...
             'DelTimeHold', 'DelTimeHoldVar', 'CueTimeHold', 'CueTimeHoldVar'});
+
+    trials_tbl.AbortedState = aborted_state_col;
+    trials_tbl.AbortedStateDuration = aborted_state_dur_col;
+    trials_tbl.MpTaskType = mp_type_col;
+    trials_tbl.EyeFixMeanX = eye_fix_mx; trials_tbl.EyeFixMeanY = eye_fix_my;
+    trials_tbl.HndFixMeanX = hnd_fix_mx; trials_tbl.HndFixMeanY = hnd_fix_my;
+    trials_tbl.EyeTarMeanX = eye_tar_mx; trials_tbl.EyeTarMeanY = eye_tar_my;
+    trials_tbl.HndTarMeanX = hnd_tar_mx; trials_tbl.HndTarMeanY = hnd_tar_my;
+    trials_tbl.EyeAbortPreX = eye_pre_x; trials_tbl.EyeAbortPreY = eye_pre_y;
+    trials_tbl.HndAbortPreX = hnd_pre_x; trials_tbl.HndAbortPreY = hnd_pre_y;
+    trials_tbl.EyeAbortPostX = eye_post_x; trials_tbl.EyeAbortPostY = eye_post_y;
+    trials_tbl.HndAbortPostX = hnd_post_x; trials_tbl.HndAbortPostY = hnd_post_y;
+    trials_tbl.WinEyeFixX = win_eye_fix_x; trials_tbl.WinEyeFixY = win_eye_fix_y; trials_tbl.WinEyeFixR = win_eye_fix_r;
+    trials_tbl.WinHndFixX = win_hnd_fix_x; trials_tbl.WinHndFixY = win_hnd_fix_y; trials_tbl.WinHndFixR = win_hnd_fix_r;
+    trials_tbl.WinEyeTarX = win_eye_tar_x; trials_tbl.WinEyeTarY = win_eye_tar_y; trials_tbl.WinEyeTarR = win_eye_tar_r;
+    trials_tbl.WinHndTarX = win_hnd_tar_x; trials_tbl.WinHndTarY = win_hnd_tar_y; trials_tbl.WinHndTarR = win_hnd_tar_r;
+    trials_tbl.WinEyeTar2X = win_eye_tar2_x; trials_tbl.WinEyeTar2Y = win_eye_tar2_y; trials_tbl.WinEyeTar2R = win_eye_tar2_r;
+    trials_tbl.WinHndTar2X = win_hnd_tar2_x; trials_tbl.WinHndTar2Y = win_hnd_tar2_y; trials_tbl.WinHndTar2R = win_hnd_tar2_r;
+    trials_tbl.WinHndCueX = win_hnd_cue_x; trials_tbl.WinHndCueY = win_hnd_cue_y; trials_tbl.WinHndCueR = win_hnd_cue_r;
+    trials_tbl.WinHndCue2X = win_hnd_cue2_x; trials_tbl.WinHndCue2Y = win_hnd_cue2_y; trials_tbl.WinHndCue2R = win_hnd_cue2_r;
 
     summary_tbl = pack_run_summary_table( ...
         condition_label, run_index, filepath, reach_paradigm, S, del_hold, del_hold_var);
@@ -480,22 +575,9 @@ end
 % TRIAL STATE / DELAY HELPERS (used inside process_single_run; not a separate pipeline stage)
 %% =============================================================================
 
-% Duration of DEL_PER state from states/states_onset (NaN if absent).
-function delay_dur = get_delay_period_duration(trial, STATE)
+% Duration of DEL_PER and time from delay-end to first later TAR_HOL (NaN if absent).
+function [delay_dur, target_acq_time] = get_delay_and_target_acq(trial, STATE)
     delay_dur = NaN;
-    if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
-        return;
-    end
-    states = trial.states(:);
-    onsets = trial.states_onset(:);
-    delay_idx = find(states == STATE.DEL_PER, 1, 'first');
-    if ~isempty(delay_idx) && delay_idx < numel(onsets)
-        delay_dur = onsets(delay_idx + 1) - onsets(delay_idx);
-    end
-end
-
-% Time from end of delay period to first TAR_HOL onset after delay (NaN if not reached).
-function target_acq_time = get_target_acq_time(trial, STATE)
     target_acq_time = NaN;
     if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
         return;
@@ -503,14 +585,14 @@ function target_acq_time = get_target_acq_time(trial, STATE)
     states = trial.states(:);
     onsets = trial.states_onset(:);
     delay_idx = find(states == STATE.DEL_PER, 1, 'first');
-    if isempty(delay_idx) || delay_idx + 1 > numel(onsets)
+    if isempty(delay_idx) || delay_idx >= numel(onsets)
         return;
     end
-    end_delay = onsets(delay_idx + 1);
+    delay_dur = onsets(delay_idx + 1) - onsets(delay_idx);
     idx_hold = find(states == STATE.TAR_HOL);
     idx_hold = idx_hold(idx_hold > delay_idx);
     if ~isempty(idx_hold) && idx_hold(1) <= numel(onsets)
-        target_acq_time = onsets(idx_hold(1)) - end_delay;
+        target_acq_time = onsets(idx_hold(1)) - onsets(delay_idx + 1);
     end
 end
 
@@ -529,7 +611,7 @@ end
 %       (completed cue + time in DEL_PER until violation)
 % ABORT onset is typically ~0.25 s later than the break — do not use it for the hist.
 function [abort_after_cue, delay_for_hist, time_until_abort] = compute_delay_hist_fields( ...
-        trial, success, STATE, delay_duration, reason)
+        trial, success, STATE, delay_duration, reason, aborted_state)
     abort_after_cue = 0;
     delay_for_hist = NaN;
     time_until_abort = NaN;
@@ -548,7 +630,9 @@ function [abort_after_cue, delay_for_hist, time_until_abort] = compute_delay_his
     end
 
     reason_lower = lower(string(reason));
-    aborted_state = get_trial_aborted_state(trial, STATE);
+    if nargin < 6
+        aborted_state = get_trial_aborted_state(trial, STATE);
+    end
     is_cue_abort = ismember(aborted_state, [STATE.CUE_ON, STATE.DEL_PER]) || ...
         contains(reason_lower, 'del_per') || ...
         contains(reason_lower, 'abort_hnd_del_per_state') || ...
@@ -604,16 +688,7 @@ end
 
 function t_del_end = get_delay_period_end_time(trial, STATE)
 % Onset of the state that ends DEL_PER (usually TAR_ACQ), else NaN.
-    t_del_end = NaN;
-    if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
-        return;
-    end
-    states = trial.states(:);
-    onsets = trial.states_onset(:);
-    delay_idx = find(states == STATE.DEL_PER, 1, 'first');
-    if ~isempty(delay_idx) && delay_idx < numel(onsets)
-        t_del_end = onsets(delay_idx + 1);
-    end
+    [~, t_del_end] = get_state_onset_and_next(trial, STATE.DEL_PER);
 end
 
 % Last state before ABORT marker, or trial.aborted_state when present.
@@ -657,8 +732,9 @@ function plot_path = make_run_figure(trials_tbl, out_dir, run_base)
     fig = figure('Visible', 'off', 'Position', [40 40 2000 1100]);
     tl = tiledlayout(fig, 3, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     fill_session_or_run_tiles(tl, trials_tbl, {}, false);
-    sgtitle(tl, sprintf('Run: %s', run_base), 'FontWeight', 'bold', 'Interpreter', 'none');
-    set_sgtitle_interpreter_none(fig);
+    sgtitle(tl, figure_main_title(sprintf('Run: %s', run_base), trials_tbl), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    apply_figure_fonts(fig, 12, 13, 16);
     plot_path = fullfile(out_dir, [run_base '.pdf']);
     save_figure_pdf(fig, plot_path);
     close(fig);
@@ -668,8 +744,62 @@ function plot_path = make_session_figure(day_trials_tbl, run_trials_tbls, out_di
     fig = figure('Visible', 'off', 'Position', [40 40 2000 1100]);
     tl = tiledlayout(fig, 3, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     fill_session_or_run_tiles(tl, day_trials_tbl, run_trials_tbls, true);
-    sgtitle(tl, title_str, 'FontWeight', 'bold', 'Interpreter', 'none');
-    set_sgtitle_interpreter_none(fig);
+    sgtitle(tl, figure_main_title(title_str, day_trials_tbl), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    apply_figure_fonts(fig, 12, 13, 16);
+    plot_path = fullfile(out_dir, [base_name '.pdf']);
+    save_figure_pdf(fig, plot_path);
+    close(fig);
+end
+
+function plot_path = make_error_figure(trials_tbl, run_trials_tbls, is_session, out_dir, base_name, title_str)
+% Upper: abort-state % (hand x space) + abort times by state. Lower: endpoints for states in this task.
+    fig = figure('Visible', 'off', 'Position', [40 40 2400 1150], ...
+        'DefaultAxesFontSize', 14, 'DefaultTextFontSize', 14, ...
+        'DefaultAxesFontWeight', 'bold');
+    tl = tiledlayout(fig, 2, 5, 'TileSpacing', 'compact', 'Padding', 'compact');
+    ST = get_task_state_dict().STATE;
+    seq = abort_states_in_table(trials_tbl);
+
+    nexttile(tl, 1, [1 2]);
+    plot_aborted_state_hist(trials_tbl);
+
+    nexttile(tl, 3, [1 3]);
+    plot_abort_times_by_state(trials_tbl, run_trials_tbls, is_session);
+
+    panels = {};
+    if any(ismember([ST.FIX_ACQ, ST.FIX_HOL], seq))
+        panels{end+1} = @() plot_endpoint_xy(trials_tbl, 'success_fix', 'Success FIX_HOL mean');
+    end
+    if any(ismember([ST.TAR_HOL, ST.TAR_HOL_INV], seq))
+        panels{end+1} = @() plot_endpoint_xy(trials_tbl, 'success_tar', 'Success TAR_HOL mean');
+    end
+    if any(ismember([ST.FIX_ACQ, ST.FIX_HOL], seq))
+        panels{end+1} = @() plot_endpoint_abort_pair( ...
+            trials_tbl, [ST.FIX_ACQ ST.FIX_HOL], 'Abort FIX_ACQ/HOL');
+    end
+    cue_codes = intersect([ST.CUE_ON, ST.MEM_PER, ST.DEL_PER], seq, 'stable');
+    if ~isempty(cue_codes)
+        cue_title = abort_panel_title(cue_codes, 'Abort');
+        panels{end+1} = @() plot_endpoint_abort_pair(trials_tbl, cue_codes, cue_title);
+    end
+    tar_codes = intersect([ST.TAR_ACQ, ST.TAR_HOL, ST.TAR_ACQ_INV, ST.TAR_HOL_INV], seq, 'stable');
+    if ~isempty(tar_codes)
+        tar_title = abort_panel_title(tar_codes, 'Abort');
+        panels{end+1} = @() plot_endpoint_abort_pair(trials_tbl, tar_codes, tar_title);
+    end
+    for p = 1:5
+        nexttile(tl, 5 + p);
+        if p <= numel(panels)
+            panels{p}();
+        else
+            axis off;
+        end
+    end
+
+    sgtitle(tl, figure_main_title(title_str, trials_tbl), ...
+        'FontWeight', 'bold', 'Interpreter', 'none', 'FontSize', 20);
+    apply_figure_fonts(fig, 14, 15, 20);
     plot_path = fullfile(out_dir, [base_name '.pdf']);
     save_figure_pdf(fig, plot_path);
     close(fig);
@@ -709,7 +839,13 @@ function fill_session_or_run_tiles(tl, trials_tbl, run_trials_tbls, is_session)
     plot_rt_vs_successful_trial(trials_tbl, is_session);
 
     nexttile(tl, 10);
-    plot_delay_percent_histogram(trials_tbl);
+    if table_has_cue_like_epoch(trials_tbl)
+        plot_delay_percent_histogram(trials_tbl);
+    else
+        axis off;
+        title(sprintf('No cue/delay (%s)', mp_task_info_str(trials_tbl)), ...
+            'FontWeight', 'bold', 'Interpreter', 'none');
+    end
 
     nexttile(tl, 11); axis off;
     nexttile(tl, 12); axis off;
@@ -781,7 +917,7 @@ function label_bar_n(x, ns, y_ref)
     for i = 1:min(numel(x), numel(ns))
         text(x(i), y_txt, sprintf('%d', ns(i)), ...
             'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
-            'FontSize', 8, 'FontWeight', 'bold', 'Color', [0.1 0.1 0.1], ...
+            'FontSize', 11, 'FontWeight', 'bold', 'Color', [0.1 0.1 0.1], ...
             'Clipping', 'off');
     end
 end
@@ -894,7 +1030,7 @@ function plot_success_instr_space(trials_tbl, run_trials_tbls, is_session)
     xtickangle(20);
     ylabel('Success rate (%)', 'FontWeight', 'bold');
     title(sprintf(['Instructed success (cue/target shown, hand+space known)\n' ...
-        '%d instructed trials, %d successful.  (Free omitted — preference-biased)'], ...
+        '%d instructed trials, %d successful.  '], ...
         sum(n_all), sum(n_succ)), ...
         'FontWeight', 'bold', 'Interpreter', 'none');
     ylim([0 100]);
@@ -1215,6 +1351,13 @@ end
 
 function plot_delay_percent_histogram(trials_tbl)
 % Time from CUE_ON: success = cue+delay; abort = break time (aborted_state_duration).
+    if ~table_has_cue_like_epoch(trials_tbl)
+        text(0.5, 0.5, sprintf('No cue/delay (%s)', mp_task_info_str(trials_tbl)), ...
+            'HorizontalAlignment', 'center', 'Interpreter', 'none');
+        axis off;
+        title('From cue', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
     bin_width = 0.1;
     [del_hold, del_var, cue_hold, cue_var] = delay_params_from_trials(trials_tbl);
     if isnan(cue_hold), cue_hold = 0; end
@@ -1309,15 +1452,591 @@ function [del_hold, del_var, cue_hold, cue_var] = delay_params_from_trials(trial
     end
 end
 
-function set_sgtitle_interpreter_none(fig)
+function plot_aborted_state_hist(trials_tbl)
+    if isempty(trials_tbl) || height(trials_tbl) == 0 || ...
+            ~ismember('AbortedState', trials_tbl.Properties.VariableNames)
+        text(0.5, 0.5, 'No abort data', 'HorizontalAlignment', 'center');
+        axis off;
+        title('Aborted states', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    fail = trials_tbl.Success == 0 & ~isnan(trials_tbl.AbortedState);
+    if ~any(fail)
+        text(0.5, 0.5, 'No abort data', 'HorizontalAlignment', 'center');
+        axis off;
+        title('Aborted states', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    [keys, labels, colors, is_hollow] = abort_hist_series_config();
+    codes = abort_states_in_table(trials_tbl);
+    n_fail = sum(fail);
+    n_s = numel(codes);
+    n_g = numel(keys);
+    counts = zeros(n_s, n_g);
+    st = trials_tbl.AbortedState(fail);
+    reasons = trials_tbl.reason_of_abort(fail);
+    hands = trials_tbl.Hand(fail);
+    targs = trials_tbl.Target(fail);
+    for i = 1:n_fail
+        si = find(codes == st(i), 1, 'first');
+        gi = abort_hist_series_index(st(i), reasons(i), hands(i), targs(i), keys);
+        if ~isempty(si) && gi > 0
+            counts(si, gi) = counts(si, gi) + 1;
+        end
+    end
+    pct = counts / n_fail * 100;
+    x = 1:n_s;
+    x_bar = x;
+    pct_bar = pct;
+    if size(pct_bar, 1) == 1
+        pct_bar = [pct_bar; nan(1, n_g)];
+        x_bar = [x, x(end) + 1];
+    end
+    bh = bar(x_bar, pct_bar, 0.88, 'grouped');
+    hold on;
+    for g = 1:n_g
+        bh(g).DisplayName = labels{g};
+        bh(g).HandleVisibility = 'on';
+        bh(g).LineWidth = 1.4;
+        if is_hollow(g)
+            bh(g).FaceColor = [1 1 1];
+            bh(g).EdgeColor = colors(g, :);
+        else
+            bh(g).FaceColor = colors(g, :);
+            bh(g).EdgeColor = 'k';
+        end
+    end
+    xt = cell(1, n_s);
+    for i = 1:n_s
+        xt{i} = sprintf('%s (%d)', state_code_to_name(codes(i)), sum(counts(i, :)));
+    end
+    set(gca, 'XTick', x, 'XTickLabel', xt, 'FontWeight', 'bold', ...
+        'TickLabelInterpreter', 'none');
+    xtickangle(20);
+    ylabel('% of failed trials', 'FontWeight', 'bold');
+    title(sprintf('Aborted states  (n=%d failed)', n_fail), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    legend(bh, labels, 'Location', 'best', 'NumColumns', 2);
+    grid on;
+    xlim([0.5, n_s + 0.5]);
+    ymax = max(pct(:));
+    if ~(ymax > 0)
+        ymax = 1;
+    end
+    ylim([0, ymax * 1.18]);
+    if n_g > 1
+        halfw = abs(bh(2).XEndPoints(1) - bh(1).XEndPoints(1)) * 0.38;
+    else
+        halfw = 0.12;
+    end
+    y0 = 0.012 * ymax;
+    for g = 1:n_g
+        xe = bh(g).XEndPoints;
+        xe = xe(1:min(n_s, numel(xe)));
+        for si = 1:numel(xe)
+            if counts(si, g) > 0
+                continue;
+            end
+            plot(xe(si) + [-halfw, halfw], [y0, y0], '-', ...
+                'Color', colors(g, :), 'LineWidth', 2.0, ...
+                'HandleVisibility', 'off');
+        end
+    end
+end
+
+function [keys, labels, colors, is_hollow] = abort_hist_series_config()
+% Hollow (white + colored edge) = no space yet. Filled = space L/R.
+    c = plot_colors();
+    eye0 = [1.00, 0.50, 0.10];
+    eyeL = [0.80, 0.30, 0.00];
+    eyeR = [1.00, 0.72, 0.28];
+    keys = {'eye', 'eye_L', 'eye_R', 'lh', 'rh', 'lh_L', 'lh_R', 'rh_L', 'rh_R'};
+    labels = {'Eye', 'Eye L', 'Eye R', 'LH', 'RH', 'LH L', 'LH R', 'RH L', 'RH R'};
+    colors = [eye0; eyeL; eyeR; c.lh; c.rh; c.lh_instr; c.lh_choice; c.rh_instr; c.rh_choice];
+    is_hollow = [true, false, false, true, true, false, false, false, false];
+end
+
+function gi = abort_hist_series_index(state, reason, hand, target, keys)
+    key = abort_hist_series_key(state, reason, hand, target);
+    gi = find(strcmp(keys, key), 1, 'first');
+    if isempty(gi)
+        gi = 0;
+    end
+end
+
+function key = abort_hist_series_key(state, reason, hand, target)
+    r = lower(char(string(reason)));
+    is_eye = contains(r, 'abort_eye');
+    use_space = abort_state_has_space(state) && (target == "Left" || target == "Right");
+    if is_eye
+        if use_space && target == "Left"
+            key = 'eye_L';
+        elseif use_space && target == "Right"
+            key = 'eye_R';
+        else
+            key = 'eye';
+        end
+        return;
+    end
+    if use_space && hand == "Left" && target == "Left"
+        key = 'lh_L';
+    elseif use_space && hand == "Left" && target == "Right"
+        key = 'lh_R';
+    elseif use_space && hand == "Right" && target == "Left"
+        key = 'rh_L';
+    elseif use_space && hand == "Right" && target == "Right"
+        key = 'rh_R';
+    elseif hand == "Right"
+        key = 'rh';
+    else
+        key = 'lh';
+    end
+end
+
+function tf = abort_state_has_space(code)
+% Cue/target on: CUE_ON, DEL_PER, MEM_PER, TAR_*. Not FIX_*.
+    ST = get_task_state_dict().STATE;
+    tf = ismember(double(code), [ST.CUE_ON, ST.MEM_PER, ST.DEL_PER, ...
+        ST.TAR_ACQ, ST.TAR_HOL, ST.TAR_ACQ_INV, ST.TAR_HOL_INV]);
+end
+
+function plot_abort_times_by_state(trials_tbl, run_trials_tbls, is_session)
+    codes = abort_states_in_table(trials_tbl);
+    if isempty(codes)
+        text(0.5, 0.5, 'No abort times', 'HorizontalAlignment', 'center');
+        axis off;
+        title('Abort time by state', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    [means, sems, ns, trial_cells] = abort_time_by_state_stats(trials_tbl, codes);
+    x = 1:numel(codes);
+    col = [0.45 0.45 0.45];
+    colors = repmat(col, numel(codes), 1);
+    bar(x, means, 0.7, 'FaceColor', col, 'EdgeColor', 'k');
+    hold on;
+    errorbar(x, means, sems, 'k.', 'LineWidth', 1.0, 'CapSize', 6);
+    if is_session
+        overlay_run_means(x, run_trials_tbls, @(tbl) abort_time_by_state_means(tbl, codes), colors);
+    else
+        overlay_trial_dots(x, trial_cells, colors);
+    end
+    uistack(findall(gca, 'Type', 'Scatter'), 'top');
+    labels = cell(size(codes));
+    for i = 1:numel(codes)
+        labels{i} = state_code_to_name(codes(i));
+    end
+    set(gca, 'XTick', x, 'XTickLabel', labels, 'FontWeight', 'bold', ...
+        'TickLabelInterpreter', 'none');
+    xtickangle(25);
+    ylabel('Aborted-state duration (s)', 'FontWeight', 'bold');
+    title(sprintf('Abort time by state  (n=%d)', sum(ns)), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    grid on;
+    label_bar_n(x, ns, 0);
+end
+
+function means = abort_time_by_state_means(tbl, codes)
+    [means, ~, ~, ~] = abort_time_by_state_stats(tbl, codes);
+end
+
+function codes = abort_states_in_table(tbl)
+% Mid-sequence states for the MonkeyPsych type(s) in this table (no unused epochs).
+    codes = mp_task_mid_states(mp_task_types_in_table(tbl));
+end
+
+function types = mp_task_types_in_table(tbl)
+    types = [];
+    if ~isempty(tbl) && height(tbl) > 0 && ismember('MpTaskType', tbl.Properties.VariableNames)
+        v = tbl.MpTaskType(~isnan(tbl.MpTaskType));
+        types = unique(v(:)');
+    end
+    if isempty(types)
+        types = 4;
+    end
+end
+
+function codes = mp_task_mid_states(mp_types)
+    dict = get_task_state_dict();
+    TASK = dict.TASK;
+    codes = [];
+    mp_types = unique(mp_types(~isnan(mp_types)));
+    if isempty(mp_types)
+        mp_types = 4;
+    end
+    task_ids = [TASK.type];
+    for t = mp_types(:)'
+        hit = find(abs(task_ids - t) < 1e-6, 1, 'first');
+        if isempty(hit)
+            continue;
+        end
+        codes = [codes, TASK(hit).state_codes]; %#ok<AGROW>
+    end
+    if isempty(codes)
+        ST = dict.STATE;
+        codes = [ST.FIX_ACQ, ST.FIX_HOL, ST.CUE_ON, ST.DEL_PER, ST.TAR_ACQ, ST.TAR_HOL];
+    end
+    codes = sort_abort_states_chrono(unique(codes, 'stable'));
+end
+
+function tf = table_has_cue_like_epoch(tbl)
+    ST = get_task_state_dict().STATE;
+    tf = any(ismember(abort_states_in_table(tbl), [ST.CUE_ON, ST.MEM_PER, ST.DEL_PER]));
+end
+
+function s = figure_main_title(base, trials_tbl)
+    info = mp_task_info_str(trials_tbl);
+    if strlength(string(info)) == 0
+        s = char(base);
+    else
+        s = sprintf('%s  [%s]', char(base), info);
+    end
+end
+
+function s = mp_task_info_str(tbl)
+    dict = get_task_state_dict();
+    TASK = dict.TASK;
+    types = mp_task_types_in_table(tbl);
+    task_ids = [TASK.type];
+    parts = cell(numel(types), 1);
+    for i = 1:numel(types)
+        hit = find(abs(task_ids - types(i)) < 1e-6, 1, 'first');
+        if isempty(hit)
+            parts{i} = sprintf('type %g', types(i));
+        else
+            parts{i} = sprintf('type %g %s', types(i), TASK(hit).info);
+        end
+    end
+    s = strjoin(parts, '; ');
+end
+
+function title_str = abort_panel_title(codes, prefix)
+    names = cell(numel(codes), 1);
+    for i = 1:numel(codes)
+        names{i} = state_code_to_name(codes(i));
+    end
+    title_str = sprintf('%s %s', prefix, strjoin(names, '/'));
+end
+
+function codes = sort_abort_states_chrono(codes)
+% Task order: FIX -> CUE/DEL -> TAR (numeric codes put TAR before CUE).
+    codes = codes(:)';
+    if isempty(codes)
+        return;
+    end
+    ST = get_task_state_dict().STATE;
+    preferred = [ST.FIX_ACQ, ST.FIX_HOL, ST.CUE_ON, ST.DEL_PER, ST.MEM_PER, ...
+        ST.TAR_ACQ, ST.TAR_HOL, ST.TAR_ACQ_INV, ST.TAR_HOL_INV, ST.INI_TRI, ST.ABORT];
+    loc = zeros(size(codes));
+    for i = 1:numel(codes)
+        k = find(preferred == codes(i), 1, 'first');
+        if isempty(k)
+            loc(i) = 1000 + codes(i);
+        else
+            loc(i) = k;
+        end
+    end
+    [~, ord] = sort(loc);
+    codes = codes(ord);
+end
+
+function [means, sems, ns, trial_cells] = abort_time_by_state_stats(tbl, codes)
+    n = numel(codes);
+    means = nan(1, n);
+    sems = nan(1, n);
+    ns = zeros(1, n);
+    trial_cells = cell(1, n);
+    if n == 0 || isempty(tbl) || height(tbl) == 0 || ...
+            ~ismember('AbortedStateDuration', tbl.Properties.VariableNames)
+        return;
+    end
+    for i = 1:n
+        idx = tbl.Success == 0 & tbl.AbortedState == codes(i) & ...
+            ~isnan(tbl.AbortedStateDuration);
+        vals = tbl.AbortedStateDuration(idx);
+        trial_cells{i} = vals;
+        ns(i) = numel(vals);
+        if ns(i) > 0
+            means(i) = mean(vals);
+            if ns(i) > 1
+                sems(i) = std(vals) / sqrt(ns(i));
+            else
+                sems(i) = 0;
+            end
+        end
+    end
+end
+
+function plot_endpoint_xy(trials_tbl, mode, title_str)
+    eye_col = [1.00, 0.50, 0.10];
+    if isempty(trials_tbl) || height(trials_tbl) == 0
+        text(0.5, 0.5, 'No endpoint data', 'HorizontalAlignment', 'center');
+        axis off;
+        title(title_str, 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    switch mode
+        case 'success_fix'
+            keep = trials_tbl.Success == 1;
+            ex = trials_tbl.EyeFixMeanX; ey = trials_tbl.EyeFixMeanY;
+            hx = trials_tbl.HndFixMeanX; hy = trials_tbl.HndFixMeanY;
+        case 'success_tar'
+            keep = trials_tbl.Success == 1;
+            ex = trials_tbl.EyeTarMeanX; ey = trials_tbl.EyeTarMeanY;
+            hx = trials_tbl.HndTarMeanX; hy = trials_tbl.HndTarMeanY;
+        otherwise
+            keep = true(height(trials_tbl), 1);
+            ex = nan(height(trials_tbl), 1); ey = ex; hx = ex; hy = ex;
+    end
+    n_eye = sum(keep & ~isnan(ex) & ~isnan(ey));
+    n_hnd = sum(keep & ~isnan(hx) & ~isnan(hy));
+    if n_eye == 0 && n_hnd == 0
+        text(0.5, 0.5, 'No endpoint data', 'HorizontalAlignment', 'center');
+        axis off;
+        title(title_str, 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+
+    hold on;
+    plot_task_windows(trials_tbl);
+
+    idx_e = keep & ~isnan(ex) & ~isnan(ey);
+    scatter(ex(idx_e), ey(idx_e), 12, 'o', ...
+        'MarkerFaceColor', eye_col, 'MarkerEdgeColor', 'none', ...
+        'MarkerFaceAlpha', 0.65, 'DisplayName', 'Eye');
+
+    extra_xy = [ex(idx_e), ey(idx_e)];
+    for hand = ["Left", "Right"]
+        idx_h = keep & trials_tbl.Hand == hand & ~isnan(hx) & ~isnan(hy);
+        if ~any(idx_h)
+            continue;
+        end
+        col = color_hand_task(hand, "");
+        scatter(hx(idx_h), hy(idx_h), 14, 'o', ...
+            'MarkerFaceColor', col, 'MarkerEdgeColor', 'none', ...
+            'MarkerFaceAlpha', 0.65, 'DisplayName', char(hand + " hand"));
+        extra_xy = [extra_xy; hx(idx_h), hy(idx_h)]; %#ok<AGROW>
+    end
+
+    axis equal;
+    lims = endpoint_axis_limits(trials_tbl, extra_xy);
+    set(gca, 'XLim', lims, 'YLim', lims, 'DataAspectRatio', [1 1 1], 'FontWeight', 'bold');
+    xlabel('x', 'FontWeight', 'bold');
+    ylabel('y', 'FontWeight', 'bold');
+    title(sprintf('%s  (eye %d, hnd %d)', title_str, n_eye, n_hnd), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    legend('Location', 'best');
+    grid on;
+end
+
+function plot_endpoint_abort_pair(trials_tbl, state_codes, title_str)
+% Pre and post abort samples on one axes, connected. Windows from all trials.
+    eye_col = [1.00, 0.50, 0.10];
+    if isempty(trials_tbl) || height(trials_tbl) == 0
+        text(0.5, 0.5, 'No abort data', 'HorizontalAlignment', 'center');
+        axis off;
+        title(title_str, 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    keep = trials_tbl.Success == 0 & ismember(trials_tbl.AbortedState, state_codes);
+    n_keep = sum(keep);
+    hold on;
+    plot_task_windows(trials_tbl);
+
+    extra_xy = zeros(0, 2);
+    extra_xy = plot_abort_effector_pairs( ...
+        trials_tbl, keep, 'EyeAbortPreX', 'EyeAbortPreY', 'EyeAbortPostX', 'EyeAbortPostY', ...
+        [], eye_col, 'Eye', extra_xy);
+    extra_xy = plot_abort_effector_pairs( ...
+        trials_tbl, keep, 'HndAbortPreX', 'HndAbortPreY', 'HndAbortPostX', 'HndAbortPostY', ...
+        "Left", color_hand_task("Left", ""), 'Left hand', extra_xy);
+    extra_xy = plot_abort_effector_pairs( ...
+        trials_tbl, keep, 'HndAbortPreX', 'HndAbortPreY', 'HndAbortPostX', 'HndAbortPostY', ...
+        "Right", color_hand_task("Right", ""), 'Right hand', extra_xy);
+
+    axis equal;
+    lims = endpoint_axis_limits(trials_tbl, extra_xy);
+    set(gca, 'XLim', lims, 'YLim', lims, 'DataAspectRatio', [1 1 1], 'FontWeight', 'bold');
+    xlabel('x', 'FontWeight', 'bold');
+    ylabel('y', 'FontWeight', 'bold');
+    title(sprintf('%s  n=%d', title_str, n_keep), ...
+        'FontWeight', 'bold', 'Interpreter', 'none');
+    legend('Location', 'best');
+    grid on;
+end
+
+function extra_xy = plot_abort_effector_pairs(tbl, keep, xpre, ypre, xpost, ypost, hand, col, name, extra_xy)
+    idx = keep;
+    if ~isempty(hand)
+        idx = idx & tbl.Hand == hand;
+    end
+    xp = tbl.(xpre); yp = tbl.(ypre);
+    xo = tbl.(xpost); yo = tbl.(ypost);
+    has_pre = idx & ~isnan(xp) & ~isnan(yp);
+    has_post = idx & ~isnan(xo) & ~isnan(yo);
+    both = has_pre & has_post;
+    if any(both)
+        n = sum(both);
+        xx = [xp(both), xo(both), nan(n, 1)]';
+        yy = [yp(both), yo(both), nan(n, 1)]';
+        plot(xx(:), yy(:), '-', 'Color', [col, 0.40], 'LineWidth', 0.5, ...
+            'HandleVisibility', 'off');
+    end
+    shown = false;
+    if any(has_pre)
+        scatter(xp(has_pre), yp(has_pre), 16, 'o', ...
+            'MarkerFaceColor', col, 'MarkerEdgeColor', 'none', ...
+            'MarkerFaceAlpha', 0.75, 'DisplayName', name);
+        extra_xy = [extra_xy; xp(has_pre), yp(has_pre)];
+        shown = true;
+    end
+    if any(has_post)
+        vis = 'off';
+        dname = name;
+        if ~shown
+            vis = 'on';
+        end
+        scatter(xo(has_post), yo(has_post), 16, 'o', ...
+            'MarkerFaceColor', 'none', 'MarkerEdgeColor', col, ...
+            'LineWidth', 0.8, 'HandleVisibility', vis, 'DisplayName', dname);
+        extra_xy = [extra_xy; xo(has_post), yo(has_post)];
+    end
+end
+
+function plot_task_windows(trials_tbl)
+% Eye windows orange; hand fix/tar/cue dark yellow (not LH/RH blue/green).
+    eye_face = [1.00 0.70 0.35];
+    eye_edge = [0.85 0.40 0.05];
+    hnd_face = [0.85 0.70 0.12];
+    hnd_edge = [0.55 0.40 0.02];
+    plot_unique_window_set(trials_tbl, { ...
+        {'WinEyeFixX', 'WinEyeFixY', 'WinEyeFixR'}, ...
+        {'WinEyeTarX', 'WinEyeTarY', 'WinEyeTarR'}, ...
+        {'WinEyeTar2X', 'WinEyeTar2Y', 'WinEyeTar2R'}}, eye_face, eye_edge);
+    plot_unique_window_set(trials_tbl, { ...
+        {'WinHndFixX', 'WinHndFixY', 'WinHndFixR'}, ...
+        {'WinHndTarX', 'WinHndTarY', 'WinHndTarR'}, ...
+        {'WinHndTar2X', 'WinHndTar2Y', 'WinHndTar2R'}, ...
+        {'WinHndCueX', 'WinHndCueY', 'WinHndCueR'}, ...
+        {'WinHndCue2X', 'WinHndCue2Y', 'WinHndCue2R'}}, hnd_face, hnd_edge);
+end
+
+function plot_unique_window_set(tbl, triples, face, edge)
+    xy = zeros(0, 3);
+    for i = 1:numel(triples)
+        f = triples{i};
+        if ~all(ismember(f, tbl.Properties.VariableNames))
+            continue;
+        end
+        block = [tbl.(f{1}), tbl.(f{2}), tbl.(f{3})];
+        block = block(all(isfinite(block), 2), :);
+        xy = [xy; block]; %#ok<AGROW>
+    end
+    if isempty(xy)
+        return;
+    end
+    xy = unique(round(xy, 4), 'rows');
+    th = linspace(0, 2*pi, 80);
+    ct = cos(th); st = sin(th);
+    for i = 1:size(xy, 1)
+        x = xy(i, 1) + xy(i, 3) * ct;
+        y = xy(i, 2) + xy(i, 3) * st;
+        patch(x, y, face, 'FaceAlpha', 0.10, 'EdgeColor', edge, ...
+            'LineWidth', 1.0, 'HandleVisibility', 'off');
+        plot(xy(i, 1), xy(i, 2), '+', 'Color', edge, 'MarkerSize', 8, ...
+            'LineWidth', 1.2, 'HandleVisibility', 'off');
+    end
+end
+
+function lims = endpoint_axis_limits(tbl, extra_xy)
+% Origin-centered square covering window extents (center ± radius) and points.
+    pad = 2;
+    m = 8;
+    specs = { ...
+        'WinEyeFixX', 'WinEyeFixY', 'WinEyeFixR'; ...
+        'WinHndFixX', 'WinHndFixY', 'WinHndFixR'; ...
+        'WinEyeTarX', 'WinEyeTarY', 'WinEyeTarR'; ...
+        'WinEyeTar2X', 'WinEyeTar2Y', 'WinEyeTar2R'; ...
+        'WinHndTarX', 'WinHndTarY', 'WinHndTarR'; ...
+        'WinHndTar2X', 'WinHndTar2Y', 'WinHndTar2R'; ...
+        'WinHndCueX', 'WinHndCueY', 'WinHndCueR'; ...
+        'WinHndCue2X', 'WinHndCue2Y', 'WinHndCue2R'};
+    for i = 1:size(specs, 1)
+        xf = specs{i, 1}; yf = specs{i, 2}; rf = specs{i, 3};
+        if ~all(ismember({xf, yf, rf}, tbl.Properties.VariableNames))
+            continue;
+        end
+        xyz = [tbl.(xf), tbl.(yf), tbl.(rf)];
+        xyz = xyz(all(isfinite(xyz), 2), :);
+        if isempty(xyz)
+            continue;
+        end
+        m = max([m; abs(xyz(:, 1)) + xyz(:, 3); abs(xyz(:, 2)) + xyz(:, 3)]);
+    end
+    if nargin >= 2 && ~isempty(extra_xy)
+        extra_xy = extra_xy(all(isfinite(extra_xy), 2), :);
+        if ~isempty(extra_xy)
+            m = max([m; abs(extra_xy(:))]);
+        end
+    end
+    lims = [-(m + pad), m + pad];
+end
+
+function dict = get_task_state_dict()
+% STATE / STATE_NAME from ma1_task_state_dictionary.m (local fns cannot see caller workspace).
+    persistent CACHE
+    if isempty(CACHE)
+        run(fullfile(fileparts(mfilename('fullpath')), 'ma1_task_state_dictionary.m'));
+        CACHE = struct('STATE', STATE, 'STATE_NAME', STATE_NAME, 'TASK', TASK);
+    end
+    dict = CACHE;
+end
+
+function name = state_code_to_name(code)
+    map = get_task_state_dict().STATE_NAME;
+    code = double(code);
+    if isKey(map, code)
+        name = map(code);
+    else
+        name = sprintf('S%g', code);
+    end
+end
+
+function apply_figure_fonts(fig, ax_sz, title_sz, sg_sz)
     if isempty(fig) || ~ishghandle(fig)
         return;
     end
-    layouts = findall(fig, 'Type', 'tiledlayout');
-    for i = 1:numel(layouts)
-        tl = layouts(i);
-        if isprop(tl, 'Title') && ~isempty(tl.Title) && isprop(tl.Title, 'Interpreter')
-            tl.Title.Interpreter = 'none';
+    axs = findall(fig, 'Type', 'axes');
+    for i = 1:numel(axs)
+        ax = axs(i);
+        set(ax, 'FontSize', ax_sz, 'FontWeight', 'bold');
+        if ~isempty(ax.Title) && isprop(ax.Title, 'FontSize')
+            ax.Title.FontSize = title_sz;
+            ax.Title.FontWeight = 'bold';
+        end
+        if ~isempty(ax.XLabel)
+            ax.XLabel.FontSize = ax_sz;
+            ax.XLabel.FontWeight = 'bold';
+        end
+        if ~isempty(ax.YLabel)
+            ax.YLabel.FontSize = ax_sz;
+            ax.YLabel.FontWeight = 'bold';
+        end
+    end
+    legs = findall(fig, 'Type', 'legend');
+    if ~isempty(legs)
+        set(legs, 'FontSize', max(ax_sz - 1, 10), 'FontWeight', 'bold');
+    end
+    tls = findall(fig, 'Type', 'tiledlayout');
+    for i = 1:numel(tls)
+        tl = tls(i);
+        if isprop(tl, 'Title') && ~isempty(tl.Title)
+            if isprop(tl.Title, 'FontSize')
+                tl.Title.FontSize = sg_sz;
+            end
+            tl.Title.FontWeight = 'bold';
+            if isprop(tl.Title, 'Interpreter')
+                tl.Title.Interpreter = 'none';
+            end
         end
         if isprop(tl, 'Subtitle') && ~isempty(tl.Subtitle) && isprop(tl.Subtitle, 'Interpreter')
             tl.Subtitle.Interpreter = 'none';
@@ -1396,22 +2115,24 @@ function report_invalid_timing_trials(trials_tbl, run_label, out_dir, run_base)
     n_succ = sum(succ);
     n_bad = sum(bad);
 
-    lines = {};
-    lines{end+1} = sprintf('RT/MT validity report  [%s]  run_base=%s', run_label, char(run_base)); %#ok<AGROW>
+    n_lines = 3 + max(n_bad, 1);
+    lines = cell(n_lines, 1);
+    k = 0;
+    k = k + 1; lines{k} = sprintf('RT/MT validity report  [%s]  run_base=%s', run_label, char(run_base));
     if ismember('File', trials_tbl.Properties.VariableNames) && height(trials_tbl) > 0
-        lines{end+1} = sprintf('File: %s', char(string(trials_tbl.File(1)))); %#ok<AGROW>
+        k = k + 1; lines{k} = sprintf('File: %s', char(string(trials_tbl.File(1))));
     end
-    lines{end+1} = sprintf('Successful trials: %d', n_succ); %#ok<AGROW>
+    k = k + 1; lines{k} = sprintf('Successful trials: %d', n_succ);
 
     if n_bad == 0
-        lines{end+1} = sprintf('Timing OK: all %d successful trials have valid RT/MT', n_succ); %#ok<AGROW>
+        k = k + 1; lines{k} = sprintf('Timing OK: all %d successful trials have valid RT/MT', n_succ);
     else
-        lines{end+1} = sprintf( ...
+        k = k + 1; lines{k} = sprintf( ...
             'Timing issues: %d / %d successful trials missing valid RT/MT', ...
-            n_bad, n_succ); %#ok<AGROW>
+            n_bad, n_succ);
         idx = find(bad);
-        for k = 1:numel(idx)
-            i = idx(k);
+        for b = 1:numel(idx)
+            i = idx(b);
             miss = shorts(isnan([ ...
                 trials_tbl.RTFixToSensorRelease(i), trials_tbl.MTSensorToFixHold(i), ...
                 trials_tbl.RTGoToMovement(i), trials_tbl.MTMovementToTarget(i)]));
@@ -1419,10 +2140,11 @@ function report_invalid_timing_trials(trials_tbl, run_label, out_dir, run_base)
             task = char(trials_tbl.TaskType(i));
             if strlength(string(hand)) == 0, hand = '?'; end
             if strlength(string(task)) == 0, task = '?'; end
-            lines{end+1} = sprintf('  trial %d  hand=%s  task=%s  missing: %s', ...
-                trials_tbl.Trial(i), hand, task, strjoin(miss, ', ')); %#ok<AGROW>
+            k = k + 1; lines{k} = sprintf('  trial %d  hand=%s  task=%s  missing: %s', ...
+                trials_tbl.Trial(i), hand, task, strjoin(miss, ', '));
         end
     end
+    lines = lines(1:k);
 
     for i = 1:numel(lines)
         fprintf('  %s\n', lines{i});
@@ -1437,14 +2159,14 @@ function report_invalid_timing_trials(trials_tbl, run_label, out_dir, run_base)
         warning('ma1:TimingReportWriteFailed', 'Could not write %s', report_path);
         return;
     end
-    cleaner = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    cleaner = onCleanup(@() fclose(fid));
     for i = 1:numel(lines)
         fprintf(fid, '%s\n', lines{i});
     end
     fprintf('  Wrote %s\n', report_path);
 end
 
-function [rt_fix_sensor, mt_sensor_fix, rt_go_move, mt_move_target] = get_trial_timing_metrics(trial, STATE)
+function [rt_fix_sensor, mt_sensor_fix, rt_go_move, mt_move_target] = get_trial_timing_metrics(trial, STATE, t_pre)
 % Four latencies for one successful trial (NaN if a stage cannot be detected).
 %
 % FIXATION epoch:
@@ -1454,42 +2176,57 @@ function [rt_fix_sensor, mt_sensor_fix, rt_go_move, mt_move_target] = get_trial_
 %   RTGoToMovement       = TAR_ACQ (Go) -> hand leaves screen fixation
 %   MTMovementToTarget   = speed onset near fixation (else detach) -> TAR_HOL
 %
-% Shared event times are cached once so sensor/Go lookups are not repeated.
+% Shared event times + aligned sample clock are reused (no 2nd/3rd align).
+    if nargin < 3
+        t_pre = [];
+    end
+    cfg = get_timing_detection_config();
     cache = struct();
     cache.t_fix_acq = get_fix_acq_onset(trial, STATE);
     cache.t_fix_hol = get_state_event_onset(trial, STATE.FIX_HOL);
     cache.t_go = get_go_cue_onset(trial, STATE);
-    cache.t_release = get_sensor_release_time(trial, cache.t_fix_acq, cache.t_fix_hol, STATE);
+    cache.t_release = get_sensor_release_time(trial, cache.t_fix_acq, cache.t_fix_hol, STATE, t_pre);
+    cache.t_pre = t_pre;
 
-    rt_fix_sensor = get_rt_fix_to_sensor_release_cached(trial, STATE, cache);
-    mt_sensor_fix = get_mt_sensor_to_fix_hold_cached(trial, STATE, cache);
-    [rt_go_move, mt_move_target] = get_reach_epoch_timing_cached(trial, STATE, cache);
+    rt_fix_sensor = get_rt_fix_to_sensor_release_cached(cfg, cache);
+    mt_sensor_fix = get_mt_sensor_to_fix_hold_cached(cfg, cache);
+    [rt_go_move, mt_move_target] = get_reach_epoch_timing_cached(trial, STATE, cache, cfg);
 end
 
-function rt_fix = get_rt_fix_to_sensor_release_cached(~, ~, cache)
+function rt_fix = get_rt_fix_to_sensor_release_cached(cfg, cache)
     rt_fix = NaN;
-    cfg = get_timing_detection_config();
     if ~isnan(cache.t_fix_acq) && ~isnan(cache.t_release)
         rt_fix = sanitize_latency(cache.t_release - cache.t_fix_acq, cfg.min_rt_fix, cfg.max_rt_fix);
     end
 end
 
-function mt_fix = get_mt_sensor_to_fix_hold_cached(~, ~, cache)
+function mt_fix = get_mt_sensor_to_fix_hold_cached(cfg, cache)
     mt_fix = NaN;
-    cfg = get_timing_detection_config();
     if ~isnan(cache.t_release) && ~isnan(cache.t_fix_hol)
         mt_fix = sanitize_latency(cache.t_fix_hol - cache.t_release, cfg.min_mt_fix, cfg.max_mt_fix);
     end
 end
 
-function [rt_go, mt_target] = get_reach_epoch_timing_cached(trial, STATE, cache)
+function [rt_go, mt_target] = get_reach_epoch_timing_cached(trial, STATE, cache, cfg)
     rt_go = NaN;
     mt_target = NaN;
-    cfg = get_timing_detection_config();
+    if nargin < 4
+        cfg = get_timing_detection_config();
+    end
     if isnan(cache.t_go)
         return;
     end
-    t_detach = get_fixation_detach_time(trial, cache.t_go, STATE);
+    if isfield(cache, 't_pre')
+        t_pre = cache.t_pre;
+    else
+        t_pre = [];
+    end
+    [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE, t_pre);
+    if numel(t) < 3
+        return;
+    end
+    t_tar_hol = get_state_event_onset(trial, STATE.TAR_HOL);
+    t_detach = detect_fixation_detach_after_go(t, x, y, cache.t_go, cfg, t_tar_hol);
     if isnan(t_detach)
         return;
     end
@@ -1497,43 +2234,46 @@ function [rt_go, mt_target] = get_reach_epoch_timing_cached(trial, STATE, cache)
     if isnan(rt_go)
         return;
     end
-    t_mt_start = detect_speed_onset_near_fixation(trial, cache.t_go, cfg, STATE);
+    t_mt_start = detect_speed_onset_near_fixation(t, x, y, cache.t_go, cfg, t_tar_hol);
     if isnan(t_mt_start)
         t_mt_start = t_detach;
     end
-    mt_target = get_mt_movement_to_target(trial, t_mt_start, STATE);
+    mt_target = get_mt_movement_to_target(t, x, y, state, t_mt_start, t_tar_hol, cfg, STATE);
 end
 
-function mt_target = get_mt_movement_to_target(trial, t_move_start, STATE)
+function mt_target = get_mt_movement_to_target(t, x, y, state, t_move_start, t_tar_hol, cfg, STATE)
     mt_target = NaN;
     if isnan(t_move_start)
         return;
     end
-    t_target = get_target_hold_onset_time(trial, t_move_start, STATE);
+    t_target = get_target_hold_onset_time(t, x, y, state, t_move_start, t_tar_hol, cfg, STATE);
     if isnan(t_target)
         return;
     end
-    cfg = get_timing_detection_config();
     mt_target = sanitize_latency(t_target - t_move_start, cfg.min_mt_target, cfg.max_mt_target);
 end
 
 function cfg = get_timing_detection_config()
-    cfg.min_rt_fix = 0.05;
-    cfg.max_rt_fix = 5.0;
-    cfg.min_mt_fix = 0.01;
-    cfg.max_mt_fix = 5.0;
-    cfg.min_rt_go = 0.05;
-    cfg.max_rt_go = 2.0;
-    cfg.pre_go_baseline_win = 0.10;
-    cfg.fix_exit_radius = 1.2;
-    cfg.move_onset_speed_abs = 400;
-    cfg.move_onset_speed_margin = 150;
-    cfg.move_onset_max_disp = 2.0;
-    cfg.min_mt_target = 0.10;
-    cfg.max_mt_target = 2.0;
-    cfg.target_hold_window = 0.05;
-    cfg.target_acq_radius = 5;
-    cfg.target_sustain_samples = 3;
+    persistent CFG
+    if isempty(CFG)
+        CFG.min_rt_fix = 0.05;
+        CFG.max_rt_fix = 5.0;
+        CFG.min_mt_fix = 0.01;
+        CFG.max_mt_fix = 5.0;
+        CFG.min_rt_go = 0.05;
+        CFG.max_rt_go = 2.0;
+        CFG.pre_go_baseline_win = 0.10;
+        CFG.fix_exit_radius = 1.2;
+        CFG.move_onset_speed_abs = 400;
+        CFG.move_onset_speed_margin = 150;
+        CFG.move_onset_max_disp = 2.0;
+        CFG.min_mt_target = 0.10;
+        CFG.max_mt_target = 2.0;
+        CFG.target_hold_window = 0.05;
+        CFG.target_acq_radius = 5;
+        CFG.target_sustain_samples = 3;
+    end
+    cfg = CFG;
 end
 
 function val = sanitize_latency(val, min_val, max_val)
@@ -1565,19 +2305,28 @@ function t_go = get_go_cue_onset(trial, STATE)
 end
 
 function t_on = get_state_event_onset(trial, state_code)
+    [t_on, ~] = get_state_onset_and_next(trial, state_code);
+end
+
+function [t_on, t_next] = get_state_onset_and_next(trial, state_code)
     t_on = NaN;
+    t_next = NaN;
     if ~isfield(trial, 'states') || ~isfield(trial, 'states_onset')
         return;
     end
     states = trial.states(:);
     onsets = trial.states_onset(:);
     idx = find(states == state_code, 1, 'first');
-    if ~isempty(idx) && idx <= numel(onsets)
-        t_on = onsets(idx);
+    if isempty(idx) || idx > numel(onsets)
+        return;
+    end
+    t_on = onsets(idx);
+    if idx < numel(onsets)
+        t_next = onsets(idx + 1);
     end
 end
 
-function t_release = get_sensor_release_time(trial, t_after, t_before, STATE)
+function t_release = get_sensor_release_time(trial, t_after, t_before, STATE, t_pre)
     t_release = NaN;
     if nargin < 2 || isempty(t_after) || isnan(t_after)
         t_after = -inf;
@@ -1602,14 +2351,20 @@ function t_release = get_sensor_release_time(trial, t_after, t_before, STATE)
     else
         return;
     end
-    t = trial.tSample_from_time_start(:);
+    if nargin >= 5 && ~isempty(t_pre)
+        t = t_pre(:);
+    else
+        t = trial.tSample_from_time_start(:);
+    end
     if numel(sen) < 2 || numel(t) < 2
         return;
     end
     n = min(numel(sen), numel(t));
     sen = sen(1:n);
     t = t(1:n);
-    t = align_tsample_to_state_time(trial, t, STATE);
+    if nargin < 5 || isempty(t_pre)
+        t = align_tsample_to_state_time(trial, t, STATE);
+    end
     rel_candidates = find(sen(1:end-1) > 0.5 & sen(2:end) <= 0.5);
     for k = 1:numel(rel_candidates)
         rel_idx = rel_candidates(k);
@@ -1669,11 +2424,42 @@ function t_aligned = align_tsample_to_state_time(trial, t, STATE)
     end
 end
 
-function [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE)
-    t = trial.tSample_from_time_start(:);
-    x = trial.x_hnd(:);
-    y = trial.y_hnd(:);
+function t = get_aligned_sample_time(trial, STATE)
+    t = [];
+    if ~isfield(trial, 'tSample_from_time_start') || isempty(trial.tSample_from_time_start)
+        return;
+    end
+    t = align_tsample_to_state_time(trial, trial.tSample_from_time_start(:), STATE);
+end
+
+function [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE, t_pre)
+    if nargin < 3
+        t_pre = [];
+    end
+    [t, x, y, state] = get_aligned_stream_kinematics(trial, STATE, 'x_hnd', 'y_hnd', false, t_pre);
+end
+
+function [t, x, y, state] = get_aligned_stream_kinematics(trial, STATE, xfield, yfield, keep_nan, t_pre)
+    t = [];
+    x = [];
+    y = [];
     state = [];
+    if nargin < 5
+        keep_nan = false;
+    end
+    if nargin < 6
+        t_pre = [];
+    end
+    if ~isfield(trial, 'tSample_from_time_start') || ~isfield(trial, xfield) || ~isfield(trial, yfield)
+        return;
+    end
+    if ~isempty(t_pre)
+        t = t_pre(:);
+    else
+        t = trial.tSample_from_time_start(:);
+    end
+    x = trial.(xfield)(:);
+    y = trial.(yfield)(:);
     if isfield(trial, 'state') && ~isempty(trial.state)
         state = trial.state(:);
     end
@@ -1681,13 +2467,24 @@ function [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE)
     if ~isempty(state)
         n = min(n, numel(state));
     end
-    t = align_tsample_to_state_time(trial, t(1:n), STATE);
+    if n < 1
+        t = []; x = []; y = []; state = [];
+        return;
+    end
+    t = t(1:n);
+    if isempty(t_pre)
+        t = align_tsample_to_state_time(trial, t, STATE);
+    end
     x = x(1:n);
     y = y(1:n);
     if ~isempty(state)
         state = state(1:n);
     end
-    valid = ~isnan(x) & ~isnan(y) & ~isnan(t);
+    if keep_nan
+        valid = ~isnan(t);
+    else
+        valid = ~isnan(x) & ~isnan(y) & ~isnan(t);
+    end
     t = t(valid);
     x = x(valid);
     y = y(valid);
@@ -1696,16 +2493,136 @@ function [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE)
     end
 end
 
-function [xh, yh] = get_target_hold_position(trial, STATE)
+function sp = get_trial_spatial_metrics(trial, STATE, t_pre, aborted_state, abr_dur)
+% Windows + hold means + abort pre/post samples (eye and hand).
+    if nargin < 3
+        t_pre = [];
+    end
+    if nargin < 4
+        aborted_state = [];
+    end
+    if nargin < 5
+        abr_dur = [];
+    end
+    sp = struct( ...
+        'AbortedState', NaN, 'AbortedStateDuration', NaN, ...
+        'EyeFixMeanX', NaN, 'EyeFixMeanY', NaN, 'HndFixMeanX', NaN, 'HndFixMeanY', NaN, ...
+        'EyeTarMeanX', NaN, 'EyeTarMeanY', NaN, 'HndTarMeanX', NaN, 'HndTarMeanY', NaN, ...
+        'EyeAbortPreX', NaN, 'EyeAbortPreY', NaN, 'HndAbortPreX', NaN, 'HndAbortPreY', NaN, ...
+        'EyeAbortPostX', NaN, 'EyeAbortPostY', NaN, 'HndAbortPostX', NaN, 'HndAbortPostY', NaN, ...
+        'WinEyeFixX', NaN, 'WinEyeFixY', NaN, 'WinEyeFixR', NaN, ...
+        'WinHndFixX', NaN, 'WinHndFixY', NaN, 'WinHndFixR', NaN, ...
+        'WinEyeTarX', NaN, 'WinEyeTarY', NaN, 'WinEyeTarR', NaN, ...
+        'WinHndTarX', NaN, 'WinHndTarY', NaN, 'WinHndTarR', NaN, ...
+        'WinEyeTar2X', NaN, 'WinEyeTar2Y', NaN, 'WinEyeTar2R', NaN, ...
+        'WinHndTar2X', NaN, 'WinHndTar2Y', NaN, 'WinHndTar2R', NaN, ...
+        'WinHndCueX', NaN, 'WinHndCueY', NaN, 'WinHndCueR', NaN, ...
+        'WinHndCue2X', NaN, 'WinHndCue2Y', NaN, 'WinHndCue2R', NaN);
+
+    [sp.WinEyeFixX, sp.WinEyeFixY, sp.WinEyeFixR] = get_window_xyz(trial, 'eye', 'fix');
+    [sp.WinHndFixX, sp.WinHndFixY, sp.WinHndFixR] = get_window_xyz(trial, 'hnd', 'fix');
+    [sp.WinEyeTarX, sp.WinEyeTarY, sp.WinEyeTarR] = get_window_xyz(trial, 'eye', 'tar', 1);
+    [sp.WinEyeTar2X, sp.WinEyeTar2Y, sp.WinEyeTar2R] = get_window_xyz(trial, 'eye', 'tar', 2);
+    [sp.WinHndTarX, sp.WinHndTarY, sp.WinHndTarR] = get_window_xyz(trial, 'hnd', 'tar', 1);
+    [sp.WinHndTar2X, sp.WinHndTar2Y, sp.WinHndTar2R] = get_window_xyz(trial, 'hnd', 'tar', 2);
+    [sp.WinHndCueX, sp.WinHndCueY, sp.WinHndCueR] = get_window_xyz(trial, 'hnd', 'cue', 1);
+    [sp.WinHndCue2X, sp.WinHndCue2Y, sp.WinHndCue2R] = get_window_xyz(trial, 'hnd', 'cue', 2);
+
+    [te, xe, ye, se] = get_aligned_stream_kinematics(trial, STATE, 'x_eye', 'y_eye', true, t_pre);
+    [th, xh, yh, sh] = get_aligned_stream_kinematics(trial, STATE, 'x_hnd', 'y_hnd', true, t_pre);
+    [sp.EyeFixMeanX, sp.EyeFixMeanY] = mean_in_state(te, xe, ye, se, STATE.FIX_HOL);
+    [sp.HndFixMeanX, sp.HndFixMeanY] = mean_in_state(th, xh, yh, sh, STATE.FIX_HOL);
+    [sp.EyeTarMeanX, sp.EyeTarMeanY] = mean_in_state(te, xe, ye, se, STATE.TAR_HOL);
+    [sp.HndTarMeanX, sp.HndTarMeanY] = mean_in_state(th, xh, yh, sh, STATE.TAR_HOL);
+
+    success = get_scalar_num_field(trial, 'success');
+    if ~isnan(success) && success == 1
+        return;
+    end
+    if isempty(aborted_state)
+        aborted_state = get_trial_aborted_state(trial, STATE);
+    end
+    if isempty(abr_dur)
+        abr_dur = get_aborted_state_duration(trial);
+    end
+    sp.AbortedState = aborted_state;
+    sp.AbortedStateDuration = abr_dur;
+    t_break = get_abort_break_time(trial, STATE, sp.AbortedState, sp.AbortedStateDuration);
+    [sp.EyeAbortPreX, sp.EyeAbortPreY, sp.EyeAbortPostX, sp.EyeAbortPostY] = ...
+        samples_around_time(te, xe, ye, t_break);
+    [sp.HndAbortPreX, sp.HndAbortPreY, sp.HndAbortPostX, sp.HndAbortPostY] = ...
+        samples_around_time(th, xh, yh, t_break);
+end
+
+function [x, y, r] = get_window_xyz(trial, effector, which, idx)
+    x = NaN; y = NaN; r = NaN;
+    if nargin < 4
+        idx = 1;
+    end
+    if ~isfield(trial, effector), return; end
+    S = trial.(effector);
+    if ~isfield(S, which), return; end
+    w = S.(which);
+    if isempty(w) || idx < 1 || idx > numel(w)
+        return;
+    end
+    w = w(idx);
+    if isfield(w, 'x'), x = double(w.x(1)); end
+    if isfield(w, 'y'), y = double(w.y(1)); end
+    if isfield(w, 'radius'), r = double(w.radius(1)); end
+end
+
+function [mx, my] = mean_in_state(t, x, y, state, code)
+    mx = NaN; my = NaN;
+    if isempty(t) || isempty(state)
+        return;
+    end
+    mask = state == code;
+    if ~any(mask)
+        return;
+    end
+    mx = mean(x(mask), 'omitnan');
+    my = mean(y(mask), 'omitnan');
+end
+
+function t_break = get_abort_break_time(trial, STATE, aborted_state, abr_dur)
+% Real break: aborted_state onset + aborted_state_duration (not ABORT stamp).
+    t_break = NaN;
+    if ~isnan(aborted_state) && ~isnan(abr_dur) && abr_dur >= 0
+        t_state = get_state_event_onset(trial, aborted_state);
+        if ~isnan(t_state)
+            t_break = t_state + abr_dur;
+            return;
+        end
+    end
+    t_abort = get_state_event_onset(trial, STATE.ABORT);
+    if ~isnan(t_abort)
+        t_break = t_abort;
+    end
+end
+
+function [x_pre, y_pre, x_post, y_post] = samples_around_time(t, x, y, t_break)
+    x_pre = NaN; y_pre = NaN; x_post = NaN; y_post = NaN;
+    if isempty(t) || isnan(t_break)
+        return;
+    end
+    i_pre = find(t <= t_break, 1, 'last');
+    i_post = find(t > t_break, 1, 'first');
+    if ~isempty(i_pre)
+        x_pre = x(i_pre); y_pre = y(i_pre);
+    end
+    if ~isempty(i_post)
+        x_post = x(i_post); y_post = y(i_post);
+    end
+end
+
+function [xh, yh] = get_target_hold_position(t, x, y, state, STATE, cfg)
     xh = NaN;
     yh = NaN;
-    cfg = get_timing_detection_config();
-    [t, x, y, state] = get_aligned_hand_kinematics(trial, STATE);
     if isempty(t)
         return;
     end
-
-    hold_mask = [];
+    hold_mask = false(size(t));
     if ~isempty(state)
         hold_mask = state == STATE.TAR_HOL;
     end
@@ -1718,7 +2635,6 @@ function [xh, yh] = get_target_hold_position(trial, STATE)
     else
         final_mask = t >= (max(t) - cfg.target_hold_window);
     end
-
     if ~any(final_mask)
         return;
     end
@@ -1726,29 +2642,13 @@ function [xh, yh] = get_target_hold_position(trial, STATE)
     yh = median(y(final_mask));
 end
 
-function t_detach = get_fixation_detach_time(trial, t_go, STATE)
-    t_detach = NaN;
-    if ~isfield(trial, 'x_hnd') || ~isfield(trial, 'y_hnd') || ~isfield(trial, 'tSample_from_time_start')
-        return;
-    end
-    if isnan(t_go)
-        return;
-    end
-    t_detach = detect_fixation_detach_after_go(trial, t_go, get_timing_detection_config(), STATE);
-end
-
-function t_on = detect_speed_onset_near_fixation(trial, t_go, cfg, STATE)
+function t_on = detect_speed_onset_near_fixation(t, x, y, t_go, cfg, t_tar_hol)
     t_on = NaN;
-    [t, x, y, ~] = get_aligned_hand_kinematics(trial, STATE);
     if numel(t) < 4 || isnan(t_go)
         return;
     end
-
-    spd = zeros(numel(t), 1);
-    for j = 2:numel(t)
-        dt = max(t(j) - t(j - 1), eps);
-        spd(j) = hypot(x(j) - x(j - 1), y(j) - y(j - 1)) / dt;
-    end
+    dt = max(diff(t), eps);
+    spd = [0; hypot(diff(x), diff(y)) ./ dt];
 
     pre_mask = t >= (t_go - cfg.pre_go_baseline_win) & t < t_go;
     if ~any(pre_mask)
@@ -1762,7 +2662,6 @@ function t_on = detect_speed_onset_near_fixation(trial, t_go, cfg, STATE)
 
     t_earliest = t_go + cfg.min_rt_go;
     t_latest = t_go + cfg.max_rt_go;
-    t_tar_hol = get_state_event_onset(trial, STATE.TAR_HOL);
     if ~isnan(t_tar_hol)
         t_latest = min(t_latest, t_tar_hol);
     end
@@ -1774,13 +2673,11 @@ function t_on = detect_speed_onset_near_fixation(trial, t_go, cfg, STATE)
     end
 end
 
-function t_detach = detect_fixation_detach_after_go(trial, t_go, cfg, STATE)
+function t_detach = detect_fixation_detach_after_go(t, x, y, t_go, cfg, t_tar_hol)
     t_detach = NaN;
-    [t, x, y, ~] = get_aligned_hand_kinematics(trial, STATE);
     if numel(t) < 3 || isnan(t_go)
         return;
     end
-
     pre_mask = t >= (t_go - cfg.pre_go_baseline_win) & t < t_go;
     if ~any(pre_mask)
         return;
@@ -1790,7 +2687,6 @@ function t_detach = detect_fixation_detach_after_go(trial, t_go, cfg, STATE)
 
     t_earliest = t_go + cfg.min_rt_go;
     t_latest = t_go + cfg.max_rt_go;
-    t_tar_hol = get_state_event_onset(trial, STATE.TAR_HOL);
     if ~isnan(t_tar_hol)
         t_latest = min(t_latest, t_tar_hol);
     end
@@ -1802,43 +2698,35 @@ function t_detach = detect_fixation_detach_after_go(trial, t_go, cfg, STATE)
     end
 end
 
-function t_target = get_target_hold_onset_time(trial, t_detach, STATE)
+function t_target = get_target_hold_onset_time(t, x, y, state, t_detach, t_tar_hol, cfg, STATE)
     t_target = NaN;
     if isnan(t_detach)
         return;
     end
-
-    t_tar_hol = get_state_event_onset(trial, STATE.TAR_HOL);
     if ~isnan(t_tar_hol) && t_tar_hol >= t_detach
         t_target = t_tar_hol;
         return;
     end
-
-    t_target = get_kinematic_target_arrival_time(trial, t_detach, STATE);
+    t_target = get_kinematic_target_arrival_time(t, x, y, state, t_detach, cfg, STATE);
 end
 
-function t_target = get_kinematic_target_arrival_time(trial, t_detach, STATE)
+function t_target = get_kinematic_target_arrival_time(t, x, y, state, t_detach, cfg, STATE)
     t_target = NaN;
-    if isnan(t_detach) || ~isfield(trial, 'x_hnd') || ~isfield(trial, 'y_hnd')
+    if isnan(t_detach)
         return;
     end
-
-    cfg = get_timing_detection_config();
-    [xh, yh] = get_target_hold_position(trial, STATE);
+    [xh, yh] = get_target_hold_position(t, x, y, state, STATE, cfg);
     if isnan(xh) || isnan(yh)
         return;
     end
-
-    [t, x, y, ~] = get_aligned_hand_kinematics(trial, STATE);
     onset_idx = find(t >= t_detach, 1, 'first');
     if isempty(onset_idx)
         return;
     end
-
     n_sustain = cfg.target_sustain_samples;
+    d = hypot(x - xh, y - yh);
     for k = onset_idx:(numel(t) - n_sustain + 1)
-        in_zone = hypot(x(k:(k + n_sustain - 1)) - xh, y(k:(k + n_sustain - 1)) - yh) <= cfg.target_acq_radius;
-        if all(in_zone)
+        if all(d(k:(k + n_sustain - 1)) <= cfg.target_acq_radius)
             t_target = t(k);
             return;
         end
@@ -1868,7 +2756,7 @@ function session_folder = infer_session_folder_name(input_path)
         session_dir = fileparts(input_path);
     else
         % Path may not exist yet / Dropbox offline — still use folder parts.
-        [parent, name, ext] = fileparts(input_path);
+        [parent, ~, ext] = fileparts(input_path);
         if isempty(ext)
             session_dir = input_path;
         else
@@ -1883,6 +2771,123 @@ function session_folder = infer_session_folder_name(input_path)
     if isempty(session_folder)
         error('Could not infer session folder name from input_path: %s', input_path);
     end
+end
+
+function [run_files, keep_ids] = apply_keep_runs(run_files, keep_runs)
+% Keep files whose stem ends in _xx matching keep_runs. Empty keep_runs = all.
+    keep_ids = [];
+    if nargin < 2 || isempty(keep_runs)
+        return;
+    end
+    keep_ids = parse_keep_run_ids(keep_runs);
+    if isempty(keep_ids)
+        error('keep_runs did not parse to any run _xx ids.');
+    end
+    n = numel(run_files);
+    file_ids = NaN(n, 1);
+    for i = 1:n
+        file_ids(i) = run_id_from_filename(run_files{i});
+    end
+    keep_mask = false(n, 1);
+    missing = {};
+    for k = 1:numel(keep_ids)
+        id = keep_ids(k);
+        hit = file_ids == id;
+        if ~any(hit)
+            missing{end+1} = sprintf('%02d', id); %#ok<AGROW>
+        else
+            keep_mask = keep_mask | hit;
+        end
+    end
+    if ~isempty(missing)
+        found = format_run_suffix_tag(run_files);
+        error('No .mat matching requested run _%s. Found: %s', ...
+            strjoin(missing, ', _'), found);
+    end
+    run_files = run_files(keep_mask);
+    run_files = run_files(:);
+end
+
+function ids = parse_keep_run_ids(keep_runs)
+    ids = [];
+    if isnumeric(keep_runs)
+        ids = unique(round(keep_runs(:))', 'stable');
+        ids = ids(~isnan(ids));
+        return;
+    end
+    if isstring(keep_runs) || ischar(keep_runs)
+        keep_runs = cellstr(keep_runs);
+    elseif ~iscell(keep_runs)
+        error('keep_runs must be numeric, char/string, or cell.');
+    end
+    for k = 1:numel(keep_runs)
+        item = keep_runs{k};
+        if isnumeric(item)
+            ids = [ids, round(item(:)')]; %#ok<AGROW>
+            continue;
+        end
+        s = strtrim(char(item));
+        if isempty(s)
+            continue;
+        end
+        [~, stem, ~] = fileparts(s);
+        tok = regexp(stem, '_(\d+)$', 'tokens', 'once');
+        if ~isempty(tok)
+            ids(end+1) = str2double(tok{1}); %#ok<AGROW>
+            continue;
+        end
+        parts = regexp(regexprep(stem, '^_+', ''), '[-_,\s]+', 'split');
+        for p = 1:numel(parts)
+            part = parts{p};
+            if isempty(part)
+                continue;
+            end
+            if isempty(regexp(part, '^\d{1,3}$', 'once'))
+                error('Cannot parse run _xx from keep_runs token ''%s''.', s);
+            end
+            ids(end+1) = str2double(part); %#ok<AGROW>
+        end
+    end
+    ids = unique(ids, 'stable');
+    ids = ids(~isnan(ids));
+end
+
+function id = run_id_from_filename(fpath)
+    id = NaN;
+    if isempty(fpath)
+        return;
+    end
+    [~, stem, ~] = fileparts(fpath);
+    tok = regexp(stem, '_(\d+)$', 'tokens', 'once');
+    if ~isempty(tok)
+        id = str2double(tok{1});
+    end
+end
+
+function tag = format_run_suffix_tag(run_files)
+    if isempty(run_files)
+        tag = 'none';
+        return;
+    end
+    parts = cell(numel(run_files), 1);
+    for i = 1:numel(run_files)
+        [~, stem, ~] = fileparts(run_files{i});
+        tok = regexp(stem, '_(\d+)$', 'tokens', 'once');
+        if isempty(tok)
+            parts{i} = sprintf('%02d', i);
+        else
+            parts{i} = tok{1};
+        end
+    end
+    tag = strjoin(parts, '-');
+end
+
+function s = format_run_id_list(ids)
+    parts = cell(numel(ids), 1);
+    for i = 1:numel(ids)
+        parts{i} = sprintf('_%02d', ids(i));
+    end
+    s = strjoin(parts, ', ');
 end
 
 function [run_files, skipped_user_runs] = apply_skip_runs(run_files, skip_runs)
@@ -2003,7 +3008,7 @@ function animal_name = infer_animal_name(input_path)
     elseif isfile(input_path)
         folder = fileparts(input_path);
     else
-        [parent, name, ext] = fileparts(input_path);
+        [parent, ~, ext] = fileparts(input_path);
         if isempty(ext)
             folder = input_path;
         else
@@ -2041,7 +3046,6 @@ function animal_name = parse_animal_from_run_filename(run_file)
 end
 
 function session_date = infer_session_date(input_path, run_files)
-    session_date = NaT;
     if nargin >= 2 && ~isempty(run_files)
         for k = 1:numel(run_files)
             session_date = parse_session_date_from_run_filename(run_files{k});
@@ -2096,7 +3100,7 @@ function position = get_target_pos(trial)
     position = NaN;
     if isfield(trial, 'hnd') && isfield(trial.hnd, 'tar') && isfield(trial.hnd, 'fix') && ...
        isfield(trial.hnd.fix, 'x')
-        if numel(trial.hnd.tar) == 1 && isfield(trial.hnd.tar, 'x')
+        if isscalar(trial.hnd.tar) && isfield(trial.hnd.tar, 'x')
             tar_x = trial.hnd.tar.x;
         elseif isfield(trial, 'target_selected') && numel(trial.target_selected) >= 2 && ...
                ~isnan(trial.target_selected(2))
@@ -2118,19 +3122,7 @@ function tf = trial_reached_fixation(trial, STATE)
         return;
     end
     states = trial.states(:);
-    tf = any(states == STATE.FIX_ACQ) || any(states == STATE.FIX_HOL);
-end
-
-function tf = trial_cue_or_target_shown(trial, STATE)
-    tf = false;
-    if ~isfield(trial, 'states') || isempty(trial.states)
-        return;
-    end
-    states = trial.states(:);
-    tf = any(ismember(states, [STATE.CUE_ON, STATE.DEL_PER, STATE.TAR_ACQ, STATE.TAR_HOL]));
-    if ~tf
-        tf = ~isnan(get_target_pos(trial));
-    end
+    tf = any(states == STATE.FIX_ACQ | states == STATE.FIX_HOL);
 end
 
 function [del_hold, del_var, cue_hold, cue_var] = get_delay_timing_params(data, trials)
@@ -2138,16 +3130,20 @@ function [del_hold, del_var, cue_hold, cue_var] = get_delay_timing_params(data, 
     del_var = NaN;
     cue_hold = NaN;
     cue_var = NaN;
-    candidates = {};
+    candidates = cell(2, 1);
+    nc = 0;
     if isfield(data, 'task') && isstruct(data.task) && isfield(data.task, 'timing')
-        candidates{end+1} = data.task.timing; %#ok<AGROW>
+        nc = 1;
+        candidates{1} = data.task.timing;
     end
     for i = 1:min(numel(trials), 20)
         if isfield(trials(i), 'task') && isstruct(trials(i).task) && isfield(trials(i).task, 'timing')
-            candidates{end+1} = trials(i).task.timing; %#ok<AGROW>
+            nc = nc + 1;
+            candidates{nc} = trials(i).task.timing;
             break;
         end
     end
+    candidates = candidates(1:nc);
     for i = 1:numel(candidates)
         tim = candidates{i};
         if isfield(tim, 'del_time_hold')
@@ -2270,6 +3266,8 @@ function tbl = empty_trial_table()
             'Target', 'Hand', 'Success', 'reason_of_abort', 'TimeUntilAbort', ...
             'DelayForHist', 'AbortAfterCue', 'FixHandKnown', 'CueSpaceAssignable', ...
             'DelTimeHold', 'DelTimeHoldVar', 'CueTimeHold', 'CueTimeHoldVar'});
+    tbl = attach_empty_spatial_columns(tbl);
+    tbl.MpTaskType = double([]);
 end
 
 function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
@@ -2298,6 +3296,27 @@ function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
             'abort_use_incorrect_hand', 'abort_hnd_fix_acq_state', 'abort_hnd_del_per_state', ...
             'abort_hnd_tar_acq_state', 'abort_hnd_fix_hold_state', ...
             'DelTimeHold', 'DelTimeHoldVar'});
+end
+
+function tbl = attach_empty_spatial_columns(tbl)
+    names = { ...
+        'AbortedState', 'AbortedStateDuration', ...
+        'EyeFixMeanX', 'EyeFixMeanY', 'HndFixMeanX', 'HndFixMeanY', ...
+        'EyeTarMeanX', 'EyeTarMeanY', 'HndTarMeanX', 'HndTarMeanY', ...
+        'EyeAbortPreX', 'EyeAbortPreY', 'HndAbortPreX', 'HndAbortPreY', ...
+        'EyeAbortPostX', 'EyeAbortPostY', 'HndAbortPostX', 'HndAbortPostY', ...
+        'WinEyeFixX', 'WinEyeFixY', 'WinEyeFixR', ...
+        'WinHndFixX', 'WinHndFixY', 'WinHndFixR', ...
+        'WinEyeTarX', 'WinEyeTarY', 'WinEyeTarR', ...
+        'WinHndTarX', 'WinHndTarY', 'WinHndTarR', ...
+        'WinEyeTar2X', 'WinEyeTar2Y', 'WinEyeTar2R', ...
+        'WinHndTar2X', 'WinHndTar2Y', 'WinHndTar2R', ...
+        'WinHndCueX', 'WinHndCueY', 'WinHndCueR', ...
+        'WinHndCue2X', 'WinHndCue2Y', 'WinHndCue2R'};
+    n = height(tbl);
+    for i = 1:numel(names)
+        tbl.(names{i}) = NaN(n, 1);
+    end
 end
 
 %% =============================================================================
