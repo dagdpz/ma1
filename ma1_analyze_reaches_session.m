@@ -2,7 +2,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
 % ma1_analyze_reaches_session - Daily hand-reach session analysis (tables, plots, Excel).
 %
 % Pipeline: setup -> resolve out_dir -> discover runs -> one-load analyze -> day tables
-%           -> 3x4 PDF figures (per-run + session) -> optional Excel -> out struct.
+%           -> 3x4 PDF figures (per-run; session combined if n_runs>1) -> optional Excel -> out struct.
 %
 % Timing metrics (successful trials only):
 %   FIXATION: RTFixToSensorRelease, MTSensorToFixHold
@@ -25,7 +25,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
 %       'Y:\Data\Feno\20260818', ...
 %       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', [2 3], false);
 %   % keep Fen*_02.mat + *_03.mat (filename _xx, not discovery index)
-%   % combined PDFs: Fen_2026-08-18_02-03.pdf , Fen_2026-08-18_02-03_errors.pdf
+%   % combined PDFs (n_runs>1 only): Fen_2026-08-18_02-03.pdf , Fen_2026-08-18_02-03_errors.pdf
 %
 % Inputs:
 %   input_path   - day folder OR a single .mat (only that file if a file)
@@ -41,7 +41,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
 %   excel_fullpath, plot_files, error_plot_files, run_tables, day_table, run_trials_tables, day_trials_table
 %
 % Figures (tiledlayout 3x4): row1 instr success / free-choice share / uncrossed;
-%   row2 four RT/MT panels; row3 RT-vs-trial + wait-from-cue hist (tiles 11-12 spare).
+%   row2 four RT/MT panels; row3 RT-vs-trial + wait-from-cue hist + success counts at targets.
 % Extra errors PDF (2x5): abort-state % + abort times for this task's mid-sequence only
 %   (type 2 = FIX/TAR, no CUE/DEL); lower = endpoints for states the task actually has.
 %   lower = endpoints vs windows (eye orange, hand windows dark yellow, LH/RH traces blue/green):
@@ -49,6 +49,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
 % DelayForHist is ALWAYS from CUE_ON onset (success = cue+delay; abort = cue→abort).
 % Panel 2 = instructed hand×space only (Free success-by-chosen-space omitted).
 
+    t_wall = tic;
     prevWarn = warning('query', 'MATLAB:xlswrite:AddSheet');
     warning('off', 'MATLAB:xlswrite:AddSheet');
     c = onCleanup(@() warning(prevWarn));
@@ -107,7 +108,8 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
         error('No .mat files found after keep_runs/skip_runs.');
     end
 
-    % One load per candidate: calibration-only runs skipped inside process_single_run.
+    % One load per candidate: non-reach runs skipped inside process_single_run.
+    t_read = tic;
     run_tbls = {};
     run_trials_tbls = {};
     run_files = {};
@@ -123,7 +125,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
         t1 = datetime('now');
         if is_cal
             skipped_calibration_runs{end+1, 1} = fpath; %#ok<AGROW>
-            fprintf('  -> eye-cal only (effector==0) — skipped  [%.1f s]\n', ...
+            fprintf('  -> non-reach (eye-cal / fixation) — skipped  [%.1f s]\n', ...
                 seconds(t1 - t0));
             continue;
         end
@@ -142,7 +144,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
         fprintf('  Run%d: %s\n', i, run_files{i});
     end
     if ~isempty(skipped_calibration_runs)
-        fprintf('Skipped eye-cal runs: %d\n', numel(skipped_calibration_runs));
+        fprintf('Skipped non-reach runs: %d\n', numel(skipped_calibration_runs));
         for i = 1:numel(skipped_calibration_runs)
             fprintf('  - %s\n', skipped_calibration_runs{i});
         end
@@ -172,9 +174,13 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
     if ~isempty(day_trials_tbl)
         day_trials_tbl.Condition(:) = "Day";
     end
+    t_read_s = toc(t_read);
 
-    plot_files = cell(n_runs + 1, 1);
-    error_plot_files = cell(n_runs + 1, 1);
+    write_session_pdfs = n_runs > 1;
+    n_pdf = n_runs + double(write_session_pdfs);
+    plot_files = cell(n_pdf, 1);
+    error_plot_files = cell(n_pdf, 1);
+    t_fig = tic;
     for k = 1:n_runs
         [~, run_base, ~] = fileparts(run_files{k});
         plot_files{k} = make_run_figure(run_trials_tbls{k}, out_dir, run_base);
@@ -182,19 +188,25 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
             run_trials_tbls{k}, {}, false, out_dir, [run_base '_errors'], ...
             sprintf('Errors: %s', run_base));
     end
-    session_title = sprintf('%s %s (runs %s)', animal_name, date_str, run_tag);
-    session_base = sprintf('%s_%s_%s', animal_name, date_str, run_tag);
-    error_plot_files{end} = make_error_figure( ...
-        day_trials_tbl, run_trials_tbls, true, out_dir, ...
-        [session_base '_errors'], ...
-        sprintf('%s errors', session_title));
-    plot_files{end} = make_session_figure( ...
-        day_trials_tbl, run_trials_tbls, out_dir, ...
-        session_base, session_title);
+    if write_session_pdfs
+        session_title = sprintf('%s %s (runs %s)', animal_name, date_str, run_tag);
+        session_base = sprintf('%s_%s_%s', animal_name, date_str, run_tag);
+        error_plot_files{end} = make_error_figure( ...
+            day_trials_tbl, run_trials_tbls, true, out_dir, ...
+            [session_base '_errors'], ...
+            sprintf('%s errors', session_title));
+        plot_files{end} = make_session_figure( ...
+            day_trials_tbl, run_trials_tbls, out_dir, ...
+            session_base, session_title);
+    end
+    t_fig_s = toc(t_fig);
 
+    t_xls_s = 0;
     if write_excel
+        t_xls = tic;
         write_tables_to_excel(excel_fullpath, run_tbls, run_trials_tbls, ...
             day_tbl, day_trials_tbl);
+        t_xls_s = toc(t_xls);
     else
         excel_fullpath = "";
     end
@@ -221,6 +233,13 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
     out.day_trials_table = day_trials_tbl;
 
     fprintf('\nAnalysis complete successfully, data saved in %s\n', out_dir);
+    fprintf('=== Timing ===\n');
+    fprintf('  read/analyze   %6.1f s\n', t_read_s);
+    fprintf('  figures/PDF    %6.1f s\n', t_fig_s);
+    if write_excel
+        fprintf('  excel          %6.1f s\n', t_xls_s);
+    end
+    fprintf('  total          %6.1f s\n', toc(t_wall));
 end
 
 %% =============================================================================
@@ -228,7 +247,8 @@ end
 %% =============================================================================
 
 function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_index, condition_label, STATE)
-% One .mat load -> trial table + one-row run summary. is_cal=true if all eye-cal (effector==0).
+% One .mat load -> trial table + one-row run summary.
+% is_cal=true (skip run) if all trials are non-reach (effector==0 or fixation type).
 
     is_cal = false;
     data = load(filepath);
@@ -242,7 +262,7 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
         return;
     end
 
-    if all_eye_calibration_trials(data.trial)
+    if all_nonreach_trials(data.trial)
         is_cal = true;
         trials_tbl = empty_trial_table();
         summary_tbl = empty_run_summary_table(condition_label, run_index, filepath);
@@ -255,11 +275,9 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
     [del_hold, del_hold_var, cue_hold, cue_hold_var] = get_delay_timing_params(data, trials);
 
     if n_trials == 0
+        is_cal = true;
         trials_tbl = empty_trial_table();
         summary_tbl = empty_run_summary_table(condition_label, run_index, filepath);
-        summary_tbl.ReachParadigm(:) = reach_paradigm;
-        summary_tbl.DelTimeHold(:) = del_hold;
-        summary_tbl.DelTimeHoldVar(:) = del_hold_var;
         return;
     end
 
@@ -269,6 +287,8 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
     file_col = repmat(string(filepath), n_trials, 1);
     task_type_col = repmat("", n_trials, 1);
     mp_type_col = NaN(n_trials, 1);
+    tar_x_col = NaN(n_trials, 1);
+    tar_y_col = NaN(n_trials, 1);
     delay_col = NaN(n_trials, 1);
     target_acq_time_col = NaN(n_trials, 1);
     rt_fix_sensor_col = NaN(n_trials, 1);
@@ -331,7 +351,7 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
             S.failed_trials = S.failed_trials + 1;
         end
 
-        target_pos = get_target_pos(trial);
+        [target_pos, tar_x_col(i), tar_y_col(i)] = get_target_pos(trial);
         if target_pos == 1
             target_col(i) = "Left";
         elseif target_pos == 2
@@ -424,6 +444,8 @@ function [trials_tbl, summary_tbl, is_cal] = process_single_run(filepath, run_in
     trials_tbl.AbortedState = aborted_state_col;
     trials_tbl.AbortedStateDuration = aborted_state_dur_col;
     trials_tbl.MpTaskType = mp_type_col;
+    trials_tbl.TarX = tar_x_col;
+    trials_tbl.TarY = tar_y_col;
     trials_tbl.EyeFixMeanX = eye_fix_mx; trials_tbl.EyeFixMeanY = eye_fix_my;
     trials_tbl.HndFixMeanX = hnd_fix_mx; trials_tbl.HndFixMeanY = hnd_fix_my;
     trials_tbl.EyeTarMeanX = eye_tar_mx; trials_tbl.EyeTarMeanY = eye_tar_my;
@@ -729,24 +751,28 @@ end
 %% =============================================================================
 
 function plot_path = make_run_figure(trials_tbl, out_dir, run_base)
+    t_draw = tic;
     fig = figure('Visible', 'off', 'Position', [40 40 2000 1100]);
     tl = tiledlayout(fig, 3, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     fill_session_or_run_tiles(tl, trials_tbl, {}, false);
     sgtitle(tl, figure_main_title(sprintf('Run: %s', run_base), trials_tbl), ...
         'FontWeight', 'bold', 'Interpreter', 'none');
     apply_figure_fonts(fig, 12, 13, 16);
+    fprintf('  draw %5.1f s  run   %s\n', toc(t_draw), run_base);
     plot_path = fullfile(out_dir, [run_base '.pdf']);
     save_figure_pdf(fig, plot_path);
     close(fig);
 end
 
 function plot_path = make_session_figure(day_trials_tbl, run_trials_tbls, out_dir, base_name, title_str)
+    t_draw = tic;
     fig = figure('Visible', 'off', 'Position', [40 40 2000 1100]);
     tl = tiledlayout(fig, 3, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     fill_session_or_run_tiles(tl, day_trials_tbl, run_trials_tbls, true);
     sgtitle(tl, figure_main_title(title_str, day_trials_tbl), ...
         'FontWeight', 'bold', 'Interpreter', 'none');
     apply_figure_fonts(fig, 12, 13, 16);
+    fprintf('  draw %5.1f s  sess  %s\n', toc(t_draw), base_name);
     plot_path = fullfile(out_dir, [base_name '.pdf']);
     save_figure_pdf(fig, plot_path);
     close(fig);
@@ -754,6 +780,7 @@ end
 
 function plot_path = make_error_figure(trials_tbl, run_trials_tbls, is_session, out_dir, base_name, title_str)
 % Upper: abort-state % (hand x space) + abort times by state. Lower: endpoints for states in this task.
+    t_draw = tic;
     fig = figure('Visible', 'off', 'Position', [40 40 2400 1150], ...
         'DefaultAxesFontSize', 14, 'DefaultTextFontSize', 14, ...
         'DefaultAxesFontWeight', 'bold');
@@ -800,6 +827,7 @@ function plot_path = make_error_figure(trials_tbl, run_trials_tbls, is_session, 
     sgtitle(tl, figure_main_title(title_str, trials_tbl), ...
         'FontWeight', 'bold', 'Interpreter', 'none', 'FontSize', 20);
     apply_figure_fonts(fig, 14, 15, 20);
+    fprintf('  draw %5.1f s  err   %s\n', toc(t_draw), base_name);
     plot_path = fullfile(out_dir, [base_name '.pdf']);
     save_figure_pdf(fig, plot_path);
     close(fig);
@@ -847,7 +875,9 @@ function fill_session_or_run_tiles(tl, trials_tbl, run_trials_tbls, is_session)
             'FontWeight', 'bold', 'Interpreter', 'none');
     end
 
-    nexttile(tl, 11); axis off;
+    nexttile(tl, 11);
+    plot_success_counts_at_targets(trials_tbl);
+
     nexttile(tl, 12); axis off;
 end
 
@@ -1403,11 +1433,11 @@ function plot_delay_percent_histogram(trials_tbl)
     xlabel('Time from CUE_ON (s)', 'FontWeight', 'bold', 'Interpreter', 'none');
     ylabel('% within cohort', 'FontWeight', 'bold');
     if isempty(success_vals)
-        title(sprintf('Wait from cue  (abort %d)  cue=%.2f del=%.2f+%.2f', ...
+        title(sprintf('Wait from cue  (abort %d) \n cue=%.2f del=%.2f+%.2f', ...
             n_abort, cue_hold, del_hold, del_var), ...
             'FontWeight', 'bold', 'Interpreter', 'none');
     else
-        title(sprintf('Wait from cue  (succ %d [%.2f-%.2f], abort %d)  cue=%.2f del=%.2f+%.2f', ...
+        title(sprintf('Wait from cue  (succ %d [%.2f-%.2f], abort %d) \n cue=%.2f del=%.2f+%.2f', ...
             n_succ, min(success_vals), max(success_vals), n_abort, ...
             cue_hold, del_hold, del_var), ...
             'FontWeight', 'bold', 'Interpreter', 'none');
@@ -1415,6 +1445,108 @@ function plot_delay_percent_histogram(trials_tbl)
     legend('Location', 'best');
     grid on;
     xlim([0, max_edge]);
+end
+
+function plot_success_counts_at_targets(trials_tbl)
+% Same 2D deg axes as endpoint plots. Two bars stand on each target (x,y): instr | choice.
+% Bar height is scaled to target spacing (not 1 trial = 1 deg) so rows do not overlap.
+    if isempty(trials_tbl) || height(trials_tbl) == 0 || ...
+            ~all(ismember({'TarX', 'TarY', 'Success', 'TaskType'}, ...
+            trials_tbl.Properties.VariableNames))
+        text(0.5, 0.5, 'No target positions', 'HorizontalAlignment', 'center');
+        axis off;
+        title('Successful targets', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    succ = trials_tbl.Success == 1 & isfinite(trials_tbl.TarX) & isfinite(trials_tbl.TarY);
+    if ~any(succ)
+        text(0.5, 0.5, 'No successful targets', 'HorizontalAlignment', 'center');
+        axis off;
+        title('Successful targets', 'FontWeight', 'bold', 'Interpreter', 'none');
+        return;
+    end
+    q = 0.05;
+    xy = round([trials_tbl.TarX(succ), trials_tbl.TarY(succ)] / q) * q;
+    task = trials_tbl.TaskType(succ);
+    [u_xy, ~, ic] = unique(xy, 'rows');
+    n_pos = size(u_xy, 1);
+    n_instr = accumarray(ic, double(task == "Instructed"), [n_pos, 1]);
+    n_free = accumarray(ic, double(task == "Free"), [n_pos, 1]);
+    n_max = max([n_instr; n_free; 1]);
+
+    if n_pos == 1
+        dmin = 6;
+    else
+        dist = hypot(u_xy(:, 1) - u_xy(:, 1)', u_xy(:, 2) - u_xy(:, 2)');
+        dist(1:n_pos+1:end) = inf;
+        dmin = min(dist, [], 'all');
+        if ~(dmin > 0)
+            dmin = 6;
+        end
+    end
+    dy_up = u_xy(:, 2)' - u_xy(:, 2);
+    dy_up(dy_up <= 0.05) = inf;
+    min_gap = min(dy_up, [], 'all');
+    if ~(min_gap < inf)
+        min_gap = dmin;
+    end
+    % Tallest bar uses half the vertical gap to the next target row.
+    deg_per_trial = (0.50 * min_gap) / n_max;
+    w = min(1.2, max(0.35, dmin * 0.12));
+    gap = w * 0.08;
+    h_instr = n_instr * deg_per_trial;
+    h_free = n_free * deg_per_trial;
+
+    c = plot_colors();
+    col_instr = (c.lh_instr + c.rh_instr) / 2;
+    col_free = (c.lh_choice + c.rh_choice) / 2;
+
+    hold on;
+    plot_task_windows(trials_tbl);
+    drew_instr = false;
+    drew_free = false;
+    for i = 1:n_pos
+        tx = u_xy(i, 1);
+        ty = u_xy(i, 2);
+        if n_instr(i) > 0
+            draw_count_bar2(tx - gap - w, ty, w, h_instr(i), col_instr, ~drew_instr, 'Instructed');
+            drew_instr = true;
+            text(tx - gap - w / 2, ty + h_instr(i), sprintf('%d', n_instr(i)), ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                'FontWeight', 'bold', 'FontSize', 8, 'Interpreter', 'none', ...
+                'Clipping', 'on');
+        end
+        if n_free(i) > 0
+            draw_count_bar2(tx + gap, ty, w, h_free(i), col_free, ~drew_free, 'Choice');
+            drew_free = true;
+            text(tx + gap + w / 2, ty + h_free(i), sprintf('%d', n_free(i)), ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', ...
+                'FontWeight', 'bold', 'FontSize', 8, 'Interpreter', 'none', ...
+                'Clipping', 'on');
+        end
+    end
+    
+    axis equal;
+    lims = endpoint_axis_limits(trials_tbl, u_xy);
+    set(gca, 'XLim', lims, 'YLim', lims, 'DataAspectRatio', [1 1 1], 'FontWeight', 'bold');
+    xlabel('x (deg)', 'FontWeight', 'bold');
+    ylabel('y (deg)', 'FontWeight', 'bold');
+    title(sprintf('Suc. selection (n=%d; %.2f deg/trial)', ...
+        sum(succ), deg_per_trial), 'FontWeight', 'bold', 'Interpreter', 'none');
+    if drew_instr || drew_free
+        legend('Location', 'best');
+    end
+    grid on;
+end
+
+function draw_count_bar2(x0, y0, w, h, col, show_leg, name)
+    vis = 'off';
+    if show_leg
+        vis = 'on';
+    end
+    patch([x0, x0 + w, x0 + w, x0], [y0, y0, y0 + h, y0 + h], col, ...
+        'EdgeColor', 'k', 'LineWidth', 0.8, ...
+        'HandleVisibility', vis, 'DisplayName', name);
 end
 
 function counts = histcounts_fold_overflow(vals, edges)
@@ -2047,17 +2179,21 @@ end
 function save_figure_pdf(fig, plot_path)
 % Write PDF; if destination is locked (Acrobat/etc), write alongside then error clearly.
     tmp_path = [plot_path '.tmp.pdf'];
+    t_pdf = tic;
+    used = 'exportgraphics-vector';
     try
         exportgraphics(fig, tmp_path, 'ContentType', 'vector');
     catch ME
         try
             print(fig, tmp_path, '-dpdf', '-vector');
+            used = 'print-vector';
         catch ME2
             if isfile(tmp_path), delete(tmp_path); end
             error('Failed to save PDF %s\nexportgraphics: %s\nprint: %s', ...
                 plot_path, ME.message, ME2.message);
         end
     end
+    fprintf('  PDF %5.1f s  [%s]  %s\n', toc(t_pdf), used, plot_path);
     if ~isfile(tmp_path)
         error('PDF was not written: %s', tmp_path);
     end
@@ -2959,33 +3095,40 @@ function trials = filter_reach_trials(trials)
     end
     keep = false(numel(trials), 1);
     for i = 1:numel(trials)
-        keep(i) = ~is_eye_calibration_trial(trials(i));
+        keep(i) = ~is_nonreach_trial(trials(i));
     end
     trials = trials(keep);
 end
 
-function tf = all_eye_calibration_trials(trials)
+function tf = all_nonreach_trials(trials)
     tf = false;
     if isempty(trials)
         return;
     end
     tf = true;
     for i = 1:numel(trials)
-        if ~is_eye_calibration_trial(trials(i))
+        if ~is_nonreach_trial(trials(i))
             tf = false;
             return;
         end
     end
 end
 
-function tf = is_eye_calibration_trial(trial)
-% Eye calibration: effector==0 only (type==1 alone is fixation, not eye-cal).
+function tf = is_nonreach_trial(trial)
+% Eye-only (effector==0) or fixation-like MP type (1, 8, 11, 12).
     tf = false;
     if isempty(trial) || ~isstruct(trial)
         return;
     end
     effector = get_scalar_num_field(trial, 'effector');
-    tf = ~isnan(effector) && effector == 0;
+    if ~isnan(effector) && effector == 0
+        tf = true;
+        return;
+    end
+    trial_type = get_scalar_num_field(trial, 'type');
+    if ~isnan(trial_type) && ismember(trial_type, [1, 8, 11, 12])
+        tf = true;
+    end
 end
 
 function animal_name = infer_animal_name(input_path)
@@ -3096,23 +3239,39 @@ end
 % TRIAL FIELD HELPERS
 %% =============================================================================
 
-function position = get_target_pos(trial)
+function [position, tar_x, tar_y] = get_target_pos(trial)
     position = NaN;
-    if isfield(trial, 'hnd') && isfield(trial.hnd, 'tar') && isfield(trial.hnd, 'fix') && ...
-       isfield(trial.hnd.fix, 'x')
-        if isscalar(trial.hnd.tar) && isfield(trial.hnd.tar, 'x')
-            tar_x = trial.hnd.tar.x;
-        elseif isfield(trial, 'target_selected') && numel(trial.target_selected) >= 2 && ...
-               ~isnan(trial.target_selected(2))
-            tar_x = trial.hnd.tar(trial.target_selected(2)).x;
-        else
-            return;
-        end
-        if tar_x < trial.hnd.fix.x
-            position = 1;
-        elseif tar_x > trial.hnd.fix.x
-            position = 2;
-        end
+    tar_x = NaN;
+    tar_y = NaN;
+    if ~(isfield(trial, 'hnd') && isfield(trial.hnd, 'tar')) || isempty(trial.hnd.tar)
+        return;
+    end
+    tar = trial.hnd.tar;
+    idx = [];
+    if isscalar(tar)
+        idx = 1;
+    elseif isfield(trial, 'target_selected') && numel(trial.target_selected) >= 2 && ...
+            ~isnan(trial.target_selected(2))
+        idx = trial.target_selected(2);
+    end
+    if isempty(idx) || idx < 1 || idx > numel(tar)
+        return;
+    end
+    w = tar(idx);
+    if isfield(w, 'x') && ~isempty(w.x)
+        tar_x = double(w.x(1));
+    end
+    if isfield(w, 'y') && ~isempty(w.y)
+        tar_y = double(w.y(1));
+    end
+    if isnan(tar_x) || ~isfield(trial.hnd, 'fix') || ~isfield(trial.hnd.fix, 'x')
+        return;
+    end
+    fx = trial.hnd.fix.x;
+    if tar_x < fx
+        position = 1;
+    elseif tar_x > fx
+        position = 2;
     end
 end
 
@@ -3268,6 +3427,8 @@ function tbl = empty_trial_table()
             'DelTimeHold', 'DelTimeHoldVar', 'CueTimeHold', 'CueTimeHoldVar'});
     tbl = attach_empty_spatial_columns(tbl);
     tbl.MpTaskType = double([]);
+    tbl.TarX = double([]);
+    tbl.TarY = double([]);
 end
 
 function run_tbl = empty_run_summary_table(condition_label, run_index, filepath)
