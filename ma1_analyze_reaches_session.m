@@ -1,8 +1,8 @@
-function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, write_excel, skip_runs)
+function out = ma1_analyze_reaches_session(input_path, output_base, varargin)
 % ma1_analyze_reaches_session - Daily hand-reach session analysis (tables, plots, Excel).
 %
 % Pipeline: setup -> resolve out_dir -> discover runs -> one-load analyze -> day tables
-%           -> 3x4 PDF figures (per-run; session combined if n_runs>1) -> optional Excel -> out struct.
+%           -> 3x4 PDF figures (per-run; combined if n_runs>1) -> optional Excel -> out struct.
 %
 % Timing metrics (successful trials only):
 %   FIXATION: RTFixToSensorRelease, MTSensorToFixHold
@@ -13,32 +13,42 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
 %
 % Usage:
 %   out = ma1_analyze_reaches_session(input_path, output_base);
-%   out = ma1_analyze_reaches_session(input_path, output_base, keep_runs);
-%   out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, write_excel);
-%   out = ma1_analyze_reaches_session(input_path, output_base, false);  % no Excel
+%   out = ma1_analyze_reaches_session(input_path, output_base, 'name', value, ...);
 %
 % Example:
 %   out = ma1_analyze_reaches_session( ...
 %       'Y:\Data\Feno\20260715', ...
-%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', false);
+%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\');
 %   out = ma1_analyze_reaches_session( ...
 %       'Y:\Data\Feno\20260818', ...
-%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', [2 3], false);
-%   % keep Fen*_02.mat + *_03.mat (filename _xx, not discovery index)
-%   % combined PDFs (n_runs>1 only): Fen_2026-08-18_02-03.pdf , Fen_2026-08-18_02-03_errors.pdf
+%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', ...
+%       'keep_runs', [2 3], 'write_excel', false);
+%   % keep Fen*_02.mat + *_03.mat (filename _xx, not folder order)
+%   % combined PDFs (n_runs>1): Fen_2026-08-18_02-03.pdf  (session: bars + per-run mean dots)
+%   out = ma1_analyze_reaches_session( ...
+%       'Y:\Data\Feno\20260819', ...
+%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', ...
+%       'keep_runs', [1 3], 'write_excel', false, 'pool_runs', true);
+%   % pool: all trials as one run (trial dots, no run-mean dots)
+%   out = ma1_analyze_reaches_session( ...
+%       'Y:\Data\Feno\20260819', ...
+%       'Y:\Projects\dPul-MIP\Feno\Behavior_analysis\', ...
+%       'skip_runs', 1, 'write_excel', false);
 %
 % Inputs:
 %   input_path   - day folder OR a single .mat (only that file if a file)
 %   output_base  - analysis root; session leaf from input_path -> out_dir
-%   keep_runs    - optional run _xx selector: [2 3], {'02','03'}, '02-03',
-%                  {'_02','Fen2026-08-18_05'}; []/{} = all .mat in folder
-%                  (or logical write_excel if 3rd arg is scalar logical)
-%   write_excel  - optional logical, default true
-%   skip_runs    - optional extra drop list (basenames and/or 1-based discovery indices)
+% Optional name/value, defaults:
+%   keep_runs    = []        keep all *_xx.mat. Override: 2, [2 3], '02', '02-03'
+%   skip_runs    = []        skip none.         Override: 1, [1 3], '01', '01-03'
+%   write_excel  = true
+%   pool_runs    = false     if true and n_runs>1, combined PDFs plot all trials as one run
+%                            (not session run-averages)
 %
 % Output (struct out): animal_name, session_date, session_folder, output_base, out_dir,
 %   run_files, n_runs, run_tag, keep_runs, skipped_calibration_runs, skipped_user_runs, write_excel,
-%   excel_fullpath, plot_files, error_plot_files, run_tables, day_table, run_trials_tables, day_trials_table
+%   excel_fullpath, plot_files, error_plot_files, run_tables, day_table, run_trials_tables, day_trials_table,
+%   pool_runs
 %
 % Figures (tiledlayout 3x4): row1 instr success / free-choice share / uncrossed;
 %   row2 four RT/MT panels; row3 RT-vs-trial + wait-from-cue hist + success counts at targets.
@@ -63,21 +73,23 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
     if nargin < 2 || isempty(output_base)
         error('Output base path is required.');
     end
-    if nargin < 3
-        keep_runs = [];
+
+    param.keep_runs = [];       % keep all
+    param.skip_runs = [];       % skip none
+    param.write_excel = true;
+    param.pool_runs = false;
+    if nargin > 2
+        param = apply_name_value_pairs(param, varargin);
     end
-    if nargin < 4 || isempty(write_excel)
-        write_excel = true;
-    end
-    if nargin == 3 && islogical(keep_runs) && isscalar(keep_runs)
-        write_excel = keep_runs;
-        keep_runs = [];
-    end
-    if nargin < 5 || isempty(skip_runs)
-        skip_runs = {};
-    end
+    keep_runs = param.keep_runs;
+    write_excel = param.write_excel;
+    skip_runs = param.skip_runs;
+    pool_runs = param.pool_runs;
     if ~islogical(write_excel) || ~isscalar(write_excel)
         error('write_excel must be a scalar logical.');
+    end
+    if ~islogical(pool_runs) || ~isscalar(pool_runs)
+        error('pool_runs must be a scalar logical.');
     end
 
     session_folder = infer_session_folder_name(input_path);
@@ -92,16 +104,16 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
         fprintf('  [%d] %s\n', i, all_run_files{i});
     end
 
-    [run_candidates, keep_ids] = apply_keep_runs(all_run_files, keep_runs);
-    if ~isempty(keep_ids)
-        fprintf('keep_runs _xx filter: %s\n', format_run_id_list(keep_ids));
-    end
-    [run_candidates, skipped_user_runs] = apply_skip_runs(run_candidates, skip_runs);
+    [run_candidates, skipped_user_runs] = apply_skip_runs(all_run_files, skip_runs);
     if ~isempty(skipped_user_runs)
-        fprintf('Skipped by user skip_runs (%d):\n', numel(skipped_user_runs));
+        fprintf('Skipped by skip_runs (%d):\n', numel(skipped_user_runs));
         for i = 1:numel(skipped_user_runs)
             fprintf('  - %s\n', skipped_user_runs{i});
         end
+    end
+    [run_candidates, keep_ids] = apply_keep_runs(run_candidates, keep_runs);
+    if ~isempty(keep_ids)
+        fprintf('keep_runs _xx filter: %s\n', format_run_id_list(keep_ids));
     end
     fprintf('Candidates after keep/skip: %d\n', numel(run_candidates));
     if isempty(run_candidates)
@@ -176,8 +188,14 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
     end
     t_read_s = toc(t_read);
 
-    write_session_pdfs = n_runs > 1;
-    n_pdf = n_runs + double(write_session_pdfs);
+    write_session_pdfs = (n_runs > 1) && ~pool_runs;
+    write_pooled_pdfs = (n_runs > 1) && pool_runs;
+    if pool_runs && n_runs == 1
+        fprintf('pool_runs ignored (n_runs=1; already run-style)\n');
+    elseif write_pooled_pdfs
+        fprintf('Pooling %d runs as one run-style figure (all trials concatenated)\n', n_runs);
+    end
+    n_pdf = n_runs + double(write_session_pdfs) + double(write_pooled_pdfs);
     plot_files = cell(n_pdf, 1);
     error_plot_files = cell(n_pdf, 1);
     t_fig = tic;
@@ -188,16 +206,24 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
             run_trials_tbls{k}, {}, false, out_dir, [run_base '_errors'], ...
             sprintf('Errors: %s', run_base));
     end
+    combined_base = sprintf('%s_%s_%s', animal_name, date_str, run_tag);
     if write_session_pdfs
         session_title = sprintf('%s %s (runs %s)', animal_name, date_str, run_tag);
-        session_base = sprintf('%s_%s_%s', animal_name, date_str, run_tag);
         error_plot_files{end} = make_error_figure( ...
             day_trials_tbl, run_trials_tbls, true, out_dir, ...
-            [session_base '_errors'], ...
+            [combined_base '_errors'], ...
             sprintf('%s errors', session_title));
         plot_files{end} = make_session_figure( ...
             day_trials_tbl, run_trials_tbls, out_dir, ...
-            session_base, session_title);
+            combined_base, session_title);
+    elseif write_pooled_pdfs
+        pooled_title = sprintf('%s %s pooled (runs %s)', animal_name, date_str, run_tag);
+        error_plot_files{end} = make_error_figure( ...
+            day_trials_tbl, {}, false, out_dir, ...
+            [combined_base '_errors'], ...
+            sprintf('%s errors', pooled_title));
+        plot_files{end} = make_run_figure( ...
+            day_trials_tbl, out_dir, combined_base, pooled_title);
     end
     t_fig_s = toc(t_fig);
 
@@ -220,6 +246,7 @@ function out = ma1_analyze_reaches_session(input_path, output_base, keep_runs, w
     out.n_runs = n_runs;
     out.run_tag = run_tag;
     out.keep_runs = keep_runs;
+    out.pool_runs = pool_runs;
     out.skipped_calibration_runs = skipped_calibration_runs;
     out.skipped_user_runs = skipped_user_runs;
     out.write_excel = write_excel;
@@ -750,12 +777,15 @@ end
 % VISUALIZATION — tiledlayout(3,4) run + session
 %% =============================================================================
 
-function plot_path = make_run_figure(trials_tbl, out_dir, run_base)
+function plot_path = make_run_figure(trials_tbl, out_dir, run_base, title_str)
+    if nargin < 4 || isempty(title_str)
+        title_str = sprintf('Run: %s', run_base);
+    end
     t_draw = tic;
     fig = figure('Visible', 'off', 'Position', [40 40 2000 1100]);
     tl = tiledlayout(fig, 3, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     fill_session_or_run_tiles(tl, trials_tbl, {}, false);
-    sgtitle(tl, figure_main_title(sprintf('Run: %s', run_base), trials_tbl), ...
+    sgtitle(tl, figure_main_title(title_str, trials_tbl), ...
         'FontWeight', 'bold', 'Interpreter', 'none');
     apply_figure_fonts(fig, 12, 13, 16);
     fprintf('  draw %5.1f s  run   %s\n', toc(t_draw), run_base);
@@ -2909,13 +2939,39 @@ function session_folder = infer_session_folder_name(input_path)
     end
 end
 
+function param = apply_name_value_pairs(param, args)
+% Merge 'name', value pairs into param.
+    if isempty(args)
+        return;
+    end
+    if rem(numel(args), 2) ~= 0
+        error('Optional inputs must be name/value pairs.');
+    end
+    valid = fieldnames(param);
+    for k = 1:2:numel(args)
+        name = args{k};
+        if isstring(name)
+            if ~isscalar(name)
+                error('Parameter names must be scalar strings or char vectors.');
+            end
+            name = char(name);
+        elseif ~ischar(name)
+            error('Optional inputs must be name/value pairs.');
+        end
+        if ~any(strcmp(name, valid))
+            error('Unknown parameter ''%s''. Valid: %s.', name, strjoin(valid, ', '));
+        end
+        param.(name) = args{k + 1};
+    end
+end
+
 function [run_files, keep_ids] = apply_keep_runs(run_files, keep_runs)
 % Keep files whose stem ends in _xx matching keep_runs. Empty keep_runs = all.
     keep_ids = [];
     if nargin < 2 || isempty(keep_runs)
         return;
     end
-    keep_ids = parse_keep_run_ids(keep_runs);
+    keep_ids = parse_run_xx_ids(keep_runs, 'keep_runs');
     if isempty(keep_ids)
         error('keep_runs did not parse to any run _xx ids.');
     end
@@ -2944,20 +3000,20 @@ function [run_files, keep_ids] = apply_keep_runs(run_files, keep_runs)
     run_files = run_files(:);
 end
 
-function ids = parse_keep_run_ids(keep_runs)
+function ids = parse_run_xx_ids(val, who)
     ids = [];
-    if isnumeric(keep_runs)
-        ids = unique(round(keep_runs(:))', 'stable');
+    if isnumeric(val)
+        ids = unique(round(val(:))', 'stable');
         ids = ids(~isnan(ids));
         return;
     end
-    if isstring(keep_runs) || ischar(keep_runs)
-        keep_runs = cellstr(keep_runs);
-    elseif ~iscell(keep_runs)
-        error('keep_runs must be numeric, char/string, or cell.');
+    if isstring(val) || ischar(val)
+        val = cellstr(val);
+    elseif ~iscell(val)
+        error('%s must be numeric _xx or char/string (''01'', ''01-03'', stem).', who);
     end
-    for k = 1:numel(keep_runs)
-        item = keep_runs{k};
+    for k = 1:numel(val)
+        item = val{k};
         if isnumeric(item)
             ids = [ids, round(item(:)')]; %#ok<AGROW>
             continue;
@@ -2979,7 +3035,7 @@ function ids = parse_keep_run_ids(keep_runs)
                 continue;
             end
             if isempty(regexp(part, '^\d{1,3}$', 'once'))
-                error('Cannot parse run _xx from keep_runs token ''%s''.', s);
+                error('Cannot parse run _xx from %s token ''%s''.', who, s);
             end
             ids(end+1) = str2double(part); %#ok<AGROW>
         end
@@ -3027,40 +3083,40 @@ function s = format_run_id_list(ids)
 end
 
 function [run_files, skipped_user_runs] = apply_skip_runs(run_files, skip_runs)
+% Drop *_xx.mat. 1 / '01' / '_01' all mean filename suffix, not folder order.
     skipped_user_runs = {};
     if isempty(skip_runs)
         return;
     end
-    if ischar(skip_runs)
-        skip_runs = {skip_runs};
-    elseif isstring(skip_runs)
-        skip_runs = cellstr(skip_runs);
-    elseif isnumeric(skip_runs)
-        skip_runs = num2cell(skip_runs(:));
+    skip_ids = parse_run_xx_ids(skip_runs, 'skip_runs');
+    if isempty(skip_ids)
+        error('skip_runs did not parse to any run _xx ids.');
     end
-
-    skip_mask = false(size(run_files));
-    for k = 1:numel(skip_runs)
-        item = skip_runs{k};
-        if isnumeric(item)
-            idx = round(item(1));
-            if idx >= 1 && idx <= numel(run_files)
-                skip_mask(idx) = true;
-                skipped_user_runs{end+1} = run_files{idx}; %#ok<AGROW>
-            end
+    n = numel(run_files);
+    file_ids = NaN(n, 1);
+    for i = 1:n
+        file_ids(i) = run_id_from_filename(run_files{i});
+    end
+    skip_mask = false(n, 1);
+    missing = {};
+    for k = 1:numel(skip_ids)
+        id = skip_ids(k);
+        hit = file_ids == id;
+        if ~any(hit)
+            missing{end+1} = sprintf('%02d', id); %#ok<AGROW>
         else
-            base = char(item);
-            for j = 1:numel(run_files)
-                [~, fname, ~] = fileparts(run_files{j});
-                if strcmp(fname, base) || strcmp(run_files{j}, base)
-                    skip_mask(j) = true;
-                    skipped_user_runs{end+1} = run_files{j}; %#ok<AGROW>
-                end
-            end
+            skip_mask = skip_mask | hit;
         end
     end
+    if ~isempty(missing)
+        found = format_run_suffix_tag(run_files);
+        error('skip_runs: no .mat matching _%s. Found: %s', ...
+            strjoin(missing, ', _'), found);
+    end
+    skipped_user_runs = run_files(skip_mask);
+    skipped_user_runs = skipped_user_runs(:);
     run_files = run_files(~skip_mask);
-    skipped_user_runs = unique(skipped_user_runs, 'stable');
+    run_files = run_files(:);
 end
 
 function run_files = list_day_runs(input_path)
